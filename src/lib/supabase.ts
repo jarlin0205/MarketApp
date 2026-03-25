@@ -1,0 +1,11 @@
+// IMPORTACIÓN ULTRA-DIRECTA (con extensión .js para Metro)
+import 'react-native-url-polyfill/js/URL.js';
+import 'react-native-url-polyfill/js/URLSearchParams.js';
+import { createClient } from '@supabase/supabase-js';
+
+// --- CONFIGURACIÓN DE TU BASE DE DATOS SUPABASE ---
+const supabaseUrl = 'https://rofrdxjvriirweyddxqw.supabase.co';
+const supabaseAnonKey = 'sb_publishable_GHYlZxay_YzT-pRVFJMq0Q_Y2iGfLjR';
+// --------------------------------------------------
+
+export const supabase = createClient(supabaseUrl, supabaseAnonKey);

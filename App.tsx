@@ -1,20 +1,52 @@
+import React, { useState } from 'react';
+import { View, Alert } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View } from 'react-native';
+import HomeScreen from './src/screens/HomeScreen';
+import LandingScreen from './src/screens/LandingScreen';
+import ProductDetailScreen from './src/screens/ProductDetailScreen';
+import CartScreen from './src/screens/CartScreen';
+import { Product } from './src/store/useCartStore';
+
+import AdminDashboardScreen from './src/screens/AdminDashboardScreen';
 
 export default function App() {
+  const [currentScreen, setCurrentScreen] = useState('Landing');
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+
   return (
-    <View style={styles.container}>
-      <Text>Open up App.tsx to start working on your app!</Text>
-      <StatusBar style="auto" />
+    <View style={{ flex: 1 }}>
+      {currentScreen === 'Landing' && (
+        <LandingScreen onNavigate={setCurrentScreen} />
+      )}
+      
+      {currentScreen === 'Home' && (
+        <HomeScreen 
+          onProductPress={(p) => { setSelectedProduct(p); setCurrentScreen('ProductDetail'); }} 
+          onNavigateToCart={() => setCurrentScreen('Cart')} 
+          onNavigateToLanding={() => setCurrentScreen('Landing')}
+        />
+      )}
+
+      {currentScreen === 'AdminDashboard' && (
+        <AdminDashboardScreen onBack={() => setCurrentScreen('Landing')} />
+      )}
+      
+      {currentScreen === 'ProductDetail' && selectedProduct && (
+        <ProductDetailScreen 
+          product={selectedProduct} 
+          onBack={() => setCurrentScreen('Home')}
+          onNavigateToCart={() => setCurrentScreen('Cart')}
+        />
+      )}
+
+      {currentScreen === 'Cart' && (
+        <CartScreen 
+          onBack={() => setCurrentScreen('Home')}
+          onCheckout={() => Alert.alert("Checkout", "Redirigiendo a pasarela...")}
+        />
+      )}
+      
+      <StatusBar style={currentScreen === 'Landing' ? "light" : "dark"} />
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-});

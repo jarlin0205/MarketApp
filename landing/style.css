@@ -1,0 +1,234 @@
+:root {
+    --bg-color: #050505;
+    --primary: #4CAF50;
+    --accent: #2196F3;
+    --text: #ffffff;
+    --glass: rgba(255, 255, 255, 0.05);
+    --glass-border: rgba(255, 255, 255, 0.1);
+    --gradient: linear-gradient(135deg, #4CAF50 0%, #2196F3 100%);
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Outfit', sans-serif;
+    background-color: var(--bg-color);
+    color: var(--text);
+    overflow-x: hidden;
+    line-height: 1.6;
+}
+
+header {
+    padding: 2rem 10%;
+    position: fixed;
+    width: 100%;
+    top: 0;
+    z-index: 1000;
+    backdrop-filter: blur(10px);
+    background: rgba(5, 5, 5, 0.5);
+}
+
+nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.logo {
+    font-size: 1.8rem;
+    font-weight: 800;
+    letter-spacing: -1px;
+}
+
+.logo span {
+    color: var(--primary);
+    background: var(--gradient);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+nav ul {
+    display: flex;
+    list-style: none;
+    gap: 2rem;
+    align-items: center;
+}
+
+nav a {
+    text-decoration: none;
+    color: var(--text);
+    font-weight: 500;
+    transition: 0.3s;
+    opacity: 0.8;
+}
+
+nav a:hover {
+    opacity: 1;
+    color: var(--primary);
+}
+
+.cta-nav {
+    padding: 0.6rem 1.5rem;
+    background: var(--gradient);
+    border-radius: 50px;
+    opacity: 1 !important;
+}
+
+.hero {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    padding: 0 10%;
+    gap: 5%;
+    margin-top: 50px;
+}
+
+.hero-content {
+    flex: 1;
+}
+
+.hero h1 {
+    font-size: 4.5rem;
+    font-weight: 800;
+    line-height: 1.1;
+    margin-bottom: 2rem;
+}
+
+.hero h1 span {
+    background: var(--gradient);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.hero p {
+    font-size: 1.2rem;
+    opacity: 0.7;
+    margin-bottom: 3rem;
+    max-width: 500px;
+}
+
+.hero-btns {
+    display: flex;
+    gap: 1.5rem;
+}
+
+.btn-primary {
+    padding: 1.2rem 2.5rem;
+    background: var(--gradient);
+    color: white;
+    text-decoration: none;
+    border-radius: 12px;
+    font-weight: 600;
+    box-shadow: 0 10px 30px rgba(76, 175, 80, 0.3);
+    transition: 0.3s;
+}
+
+.btn-secondary {
+    padding: 1.2rem 2.5rem;
+    background: var(--glass);
+    border: 1px solid var(--glass-border);
+    color: white;
+    text-decoration: none;
+    border-radius: 12px;
+    font-weight: 600;
+    backdrop-filter: blur(10px);
+    transition: 0.3s;
+}
+
+.btn-primary:hover, .btn-secondary:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 15px 40px rgba(76, 175, 80, 0.5);
+}
+
+.hero-image {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+}
+
+.phone-mockup {
+    width: 300px;
+    height: 600px;
+    background: #111;
+    border: 8px solid #222;
+    border-radius: 45px;
+    padding: 15px;
+    box-shadow: 0 50px 100px rgba(0,0,0,0.5), 0 0 50px rgba(76, 175, 80, 0.2);
+}
+
+.screen {
+    width: 100%;
+    height: 100%;
+    background: #000;
+    border-radius: 35px;
+    overflow: hidden;
+    position: relative;
+}
+
+.app-ui {
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+
+.glass {
+    background: var(--glass);
+    backdrop-filter: blur(20px);
+    border: 1px solid var(--glass-border);
+}
+
+.card {
+    height: 120px;
+    border-radius: 20px;
+}
+
+.features {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 2rem;
+    padding: 10% 10%;
+}
+
+.feature-card {
+    padding: 3rem;
+    border-radius: 24px;
+    text-align: center;
+    transition: 0.5s;
+}
+
+.feature-card h3 {
+    font-size: 1.5rem;
+    margin-bottom: 1rem;
+    color: var(--primary);
+}
+
+.feature-card:hover {
+    transform: scale(1.05);
+    background: rgba(255, 255, 255, 0.08);
+}
+
+@keyframes float {
+    0% { transform: translateY(0px); }
+    50% { transform: translateY(-20px); }
+    100% { transform: translateY(0px); }
+}
+
+.phone-mockup {
+    animation: float 6s ease-in-out infinite;
+}
+
+@media (max-width: 1024px) {
+    .hero {
+        flex-direction: column;
+        text-align: center;
+        padding-top: 150px;
+    }
+    .hero h1 { font-size: 3rem; }
+    .hero-btns { justify-content: center; }
+    .features { grid-template-columns: 1fr; }
+}

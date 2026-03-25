@@ -18,44 +18,57 @@ export default function CartScreen({ onBack, onCheckout }: CartScreenProps) {
     if (!user) return Alert.alert("Inicio de Sesión Requerido", "Debes iniciar sesión para realizar una compra.");
     if (items.length === 0) return;
 
-    setLoading(true);
-    try {
-      // 1. Crear el registro de la orden principal
-      const { data: orderData, error: orderError } = await supabase
-        .from('orders')
-        .insert([{ 
-          user_id: user.id, 
-          total: getCartTotal(),
-          status: 'Pendiente'
-        }])
-        .select()
-        .single();
+    // CONFIRMACIÓN ANTES DE COMPRAR
+    Alert.alert(
+      "Confirmar Pedido 🛒",
+      `¿Estás seguro de que quieres realizar este pedido por un total de $${getCartTotal().toLocaleString()}?`,
+      [
+        { text: "Cancelar", style: "cancel" },
+        { 
+          text: "Sí, Comprar", 
+          onPress: async () => {
+            setLoading(true);
+            try {
+              // 1. Crear el registro de la orden principal
+              const { data: orderData, error: orderError } = await supabase
+                .from('orders')
+                .insert([{ 
+                  user_id: user.id, 
+                  total: getCartTotal(),
+                  status: 'Pendiente'
+                }])
+                .select()
+                .single();
 
-      if (orderError) throw orderError;
+              if (orderError) throw orderError;
 
-      // 2. Crear los ítems de la orden (bulk insert)
-      const orderItems = items.map(item => ({
-        order_id: orderData.id,
-        product_id: item.id,
-        quantity: item.quantity,
-        price_at_purchase: item.priceValue
-      }));
+              // 2. Crear los ítems de la orden (bulk insert)
+              const orderItems = items.map(item => ({
+                order_id: orderData.id,
+                product_id: item.id,
+                quantity: item.quantity,
+                price_at_purchase: item.priceValue
+              }));
 
-      const { error: itemsError } = await supabase
-        .from('order_items')
-        .insert(orderItems);
+              const { error: itemsError } = await supabase
+                .from('order_items')
+                .insert(orderItems);
 
-      if (itemsError) throw itemsError;
+              if (itemsError) throw itemsError;
 
-      Alert.alert("¡Compra Exitosa!", "Tu pedido ha sido registrado correctamente.");
-      clearCart();
-      onBack(); // Regresar al Home
-    } catch (error: any) {
-      console.error('Error in checkout:', error);
-      Alert.alert("Error en el pago", error.message || "No se pudo procesar la orden.");
-    } finally {
-      setLoading(false);
-    }
+              Alert.alert("¡Compra Exitosa! 🎉", "Tu pedido ha sido recibido. Te avisaremos cuando esté listo.");
+              clearCart();
+              onBack(); 
+            } catch (error: any) {
+              console.error('Error in checkout:', error);
+              Alert.alert("Error en el pago", error.message || "No se pudo procesar la orden.");
+            } finally {
+              setLoading(false);
+            }
+          }
+        }
+      ]
+    );
   };
 
   return (

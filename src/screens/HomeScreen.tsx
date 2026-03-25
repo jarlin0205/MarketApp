@@ -11,6 +11,7 @@ import {
   Platform,
   ActivityIndicator,
   RefreshControl,
+  Alert,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { Product, useCartStore } from '../store/useCartStore';
@@ -66,6 +67,7 @@ export default function HomeScreen({ onProductPress, onNavigateToCart, onNavigat
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   
+  const addItem = useCartStore(state => state.addItem);
   const cartItemsCount = useCartStore((state) => state.items.reduce((acc, item) => acc + item.quantity, 0));
 
   const fetchProducts = async () => {
@@ -236,7 +238,13 @@ export default function HomeScreen({ onProductPress, onNavigateToCart, onNavigat
                     </View>
                     <View style={styles.priceRow}>
                       <Text style={styles.price}>{product.price}</Text>
-                      <TouchableOpacity style={styles.addBtn}>
+                      <TouchableOpacity 
+                        style={styles.addBtn}
+                        onPress={() => {
+                          addItem(product);
+                          Alert.alert("🛒 Carrito", `${product.name} añadido correctamente.`);
+                        }}
+                      >
                         <Text style={styles.addBtnText}>+</Text>
                       </TouchableOpacity>
                     </View>

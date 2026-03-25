@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, ScrollView, Image, TouchableOpacity, StyleSheet, StatusBar, Platform } from 'react-native';
+import { View, Text, ScrollView, Image, TouchableOpacity, StyleSheet, StatusBar, Platform, Alert } from 'react-native';
 import { useCartStore, Product } from '../store/useCartStore';
 
 interface ProductDetailProps {
@@ -15,7 +15,7 @@ export default function ProductDetailScreen({ product, onBack, onNavigateToCart 
 
   const handleAddToCart = () => {
     addItem(product, quantity);
-    // Optional: add some haptic feedback or toast message here in the future
+    Alert.alert("🛒 Carrito", `${product.name} (${quantity}) añadido correctamente.`);
   };
 
   return (
@@ -41,7 +41,7 @@ export default function ProductDetailScreen({ product, onBack, onNavigateToCart 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
         {/* Product Image */}
         <View style={styles.imageContainer}>
-          <Image source={{ uri: product.image_url }} style={styles.image} resizeMode="cover" />
+          <Image source={{ uri: product.image }} style={styles.image} resizeMode="cover" />
           <TouchableOpacity style={styles.heartBtn}>
              <Text style={{ fontSize: 20 }}>❤️</Text>
           </TouchableOpacity>
@@ -57,7 +57,7 @@ export default function ProductDetailScreen({ product, onBack, onNavigateToCart 
               </View>
             </View>
             
-            <Text style={styles.price}>${product.price.toFixed(2)}</Text>
+            <Text style={styles.price}>{product.price}</Text>
 
             <Text style={styles.sectionTitle}>Descripción</Text>
             <Text style={styles.description}>

@@ -58,11 +58,13 @@ interface HomeScreenProps {
   onProductPress: (product: Product) => void;
   onNavigateToCart: () => void;
   onNavigateToLanding: () => void;
+  onNavigateToAdmin: () => void;
   onNavigate: (screen: string) => void;
 }
 
-export default function HomeScreen({ onProductPress, onNavigateToCart, onNavigateToLanding, onNavigate }: HomeScreenProps) {
+export default function HomeScreen({ onProductPress, onNavigateToCart, onNavigateToLanding, onNavigateToAdmin, onNavigate }: HomeScreenProps) {
   const user = useAuthStore(state => state.user);
+  const role = useAuthStore(state => state.role);
   const [activeCategory, setActiveCategory] = useState(0);
   const [search, setSearch] = useState('');
   const [products, setProducts] = useState<Product[]>([]);
@@ -166,6 +168,11 @@ export default function HomeScreen({ onProductPress, onNavigateToCart, onNavigat
           <Text style={styles.username}>MarketApp Pro 👋</Text>
         </View>
         <View style={styles.headerActions}>
+          {role === 'admin' && (
+            <TouchableOpacity style={styles.adminIconBtn} onPress={onNavigateToAdmin}>
+              <Text style={styles.adminIconEmoji}>⚙️</Text>
+            </TouchableOpacity>
+          )}
           <TouchableOpacity style={styles.iconBtn} onPress={() => onNavigateToLanding()}>
             <Text style={styles.iconEmoji}>🚪</Text>
           </TouchableOpacity>
@@ -308,7 +315,9 @@ const styles = StyleSheet.create({
   username: { color: '#0f172a', fontSize: 20, fontWeight: '700', marginTop: 2 },
   headerActions: { flexDirection: 'row', gap: 10 },
   iconBtn: { backgroundColor: '#f1f5f9', padding: 10, borderRadius: 50, position: 'relative' },
+  adminIconBtn: { backgroundColor: '#0f172a', padding: 10, borderRadius: 50, position: 'relative', shadowColor: '#000', shadowOpacity: 0.1, shadowRadius: 5 },
   iconEmoji: { fontSize: 20 },
+  adminIconEmoji: { fontSize: 20 },
   badge: { position: 'absolute', top: -5, right: -5, backgroundColor: '#ef4444', borderRadius: 10, minWidth: 20, height: 20, justifyContent: 'center', alignItems: 'center', borderWidth: 2, borderColor: '#ffffff'},
   badgeText: { color: '#ffffff', fontSize: 10, fontWeight: 'bold' },
   notificationDot: { position: 'absolute', top: 5, right: 5, width: 12, height: 12, backgroundColor: '#ef4444', borderRadius: 6, borderWidth: 2, borderColor: '#ffffff' },

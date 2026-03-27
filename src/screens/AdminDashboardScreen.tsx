@@ -16,7 +16,7 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import { supabase } from '../lib/supabase';
 
-export default function AdminDashboardScreen({ onBack }: { onBack: () => void }) {
+export default function AdminDashboardScreen({ onBack, onViewShop }: { onBack: () => void, onViewShop: () => void }) {
   const [activeTab, setActiveTab] = useState<'inventory' | 'sales' | 'orders' | 'categories' | 'repartidores'>('inventory');
   const [inventory, setInventory] = useState<any[]>([]);
   const [orders, setOrders] = useState<any[]>([]);
@@ -547,10 +547,10 @@ export default function AdminDashboardScreen({ onBack }: { onBack: () => void })
                );
             })}
 
-            {pendingInvites.length > 0 && (
+            {pendingInvites.filter((invite: any) => invite.role === 'repartidor').length > 0 && (
               <>
                 <Text style={[styles.sectionTitle, { marginTop: 30, fontSize: 16 }]}>Invitaciones Pendientes (Lista Blanca) 📑</Text>
-                {pendingInvites.map(invite => (
+                {pendingInvites.filter((invite: any) => invite.role === 'repartidor').map((invite: any) => (
                   <View key={invite.email} style={[styles.repCard, { opacity: 0.7, borderStyle: 'dashed' }]}>
                     <View style={styles.repInfo}>
                       <Text style={styles.repName}>Pendiente de Registro</Text>
@@ -745,12 +745,17 @@ export default function AdminDashboardScreen({ onBack }: { onBack: () => void })
       <View style={styles.header}>
         <TouchableOpacity onPress={onBack} style={styles.backBtn}><Text style={styles.backText}>← Salir del Panel</Text></TouchableOpacity>
         <Text style={styles.headerTitle}>Admin Panel 💎</Text>
-        <TouchableOpacity style={styles.notifBell} onPress={() => setNotifModalVisible(true)}>
-          <Text style={{ fontSize: 24 }}>🔔</Text>
-          {pendingOrders.length > 0 ? (
-            <View style={styles.notifBadge}><Text style={styles.notifBadgeText}>{pendingOrders.length}</Text></View>
-          ) : null}
-        </TouchableOpacity>
+        <View style={styles.headerRight}>
+           <TouchableOpacity style={styles.shopBtn} onPress={onViewShop}>
+             <Text style={styles.shopBtnText}>🛒 Ver Tienda</Text>
+           </TouchableOpacity>
+           <TouchableOpacity style={styles.notifBell} onPress={() => setNotifModalVisible(true)}>
+             <Text style={{ fontSize: 24 }}>🔔</Text>
+             {pendingOrders.length > 0 ? (
+               <View style={styles.notifBadge}><Text style={styles.notifBadgeTextShort}>{pendingOrders.length > 9 ? '+9' : pendingOrders.length}</Text></View>
+             ) : null}
+           </TouchableOpacity>
+        </View>
       </View>
       <View style={styles.tabs}>
         {[
@@ -1000,10 +1005,13 @@ export default function AdminDashboardScreen({ onBack }: { onBack: () => void })
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f8fafc', paddingTop: Platform.OS === 'ios' ? 60 : 40 },
-  header: { padding: 20, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#e2e8f0' },
-  headerTitle: { fontSize: 18, fontWeight: '800', color: '#0f172a' },
-  backBtn: { padding: 5 },
-  backText: { color: '#ef4444', fontWeight: '600' },
+  header: { padding: 15, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#e2e8f0' },
+  headerTitle: { fontSize: 16, fontWeight: '800', color: '#0f172a', flex: 1, textAlign: 'center' },
+  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  backBtn: { padding: 5, width: 80 },
+  backText: { color: '#ef4444', fontWeight: '600', fontSize: 12 },
+  shopBtn: { backgroundColor: '#f1f5f9', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, borderWidth: 1, borderColor: '#e2e8f0' },
+  shopBtnText: { color: '#0f172a', fontWeight: '700', fontSize: 11 },
   tabs: { flexDirection: 'row', backgroundColor: '#fff', padding: 10 },
   tab: { flex: 1, paddingVertical: 12, alignItems: 'center', borderRadius: 12 },
   activeTab: { backgroundColor: '#0f172a' },

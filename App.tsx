@@ -28,12 +28,16 @@ export default function App() {
           onProductPress={(p) => { setSelectedProduct(p); setCurrentScreen('ProductDetail'); }} 
           onNavigateToCart={() => setCurrentScreen('Cart')} 
           onNavigateToLanding={() => setCurrentScreen('Landing')}
+          onNavigateToAdmin={() => setCurrentScreen('AdminDashboard')}
           onNavigate={setCurrentScreen}
         />
       ) : null}
 
       {currentScreen === 'AdminDashboard' ? (
-        <AdminDashboardScreen onBack={() => setCurrentScreen('Landing')} />
+        <AdminDashboardScreen 
+           onBack={() => setCurrentScreen('Landing')} 
+           onViewShop={() => setCurrentScreen('Home')}
+        />
       ) : null}
 
       {currentScreen === 'DeliveryDashboard' ? (

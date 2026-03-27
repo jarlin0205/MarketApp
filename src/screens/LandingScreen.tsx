@@ -138,15 +138,10 @@ export default function LandingScreen({ onNavigate }: { onNavigate: (screen: str
   };
 
   const handleStaffLogin = async () => {
-    // Si es el admin por defecto solicitado por el usuario
-    if (email === 'admin@marketapp.pro' && password === 'Admin123!') {
-      setUser({ email, id: 'admin-manual' }, 'admin');
-      setAdminVisible(false);
-      onNavigate('AdminDashboard');
-    } else {
-      // Intentar login normal para repartidores/admin en DB
-      handleLogin();
-    }
+    // Phase 30: Acceso validado al 100% por base de datos (Supabase Auth y tabla Profiles)
+    // Se elimina el acceso manual inseguro. Todos los administradores y repartidores deben estar 
+    // registrados formalmente en la plataforma tras haber sido pre-autorizados en la Lista Blanca.
+    handleLogin();
   };
 
   return (

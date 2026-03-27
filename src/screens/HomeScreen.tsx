@@ -15,6 +15,7 @@ import {
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { Product, useCartStore } from '../store/useCartStore';
+import { useAuthStore } from '../store/useAuthStore';
 
 // Categorías se cargan desde Supabase
 
@@ -57,20 +58,37 @@ interface HomeScreenProps {
   onProductPress: (product: Product) => void;
   onNavigateToCart: () => void;
   onNavigateToLanding: () => void;
+  onNavigate: (screen: string) => void;
 }
 
-export default function HomeScreen({ onProductPress, onNavigateToCart, onNavigateToLanding }: HomeScreenProps) {
+export default function HomeScreen({ onProductPress, onNavigateToCart, onNavigateToLanding, onNavigate }: HomeScreenProps) {
+  const user = useAuthStore(state => state.user);
   const [activeCategory, setActiveCategory] = useState(0);
   const [search, setSearch] = useState('');
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<string[]>(['Todo']);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [hasNotifications, setHasNotifications] = useState(false);
   
   const addItem = useCartStore(state => state.addItem);
   const cartItemsCount = useCartStore((state) => state.items.reduce((acc, item) => acc + item.quantity, 0));
 
+  const checkNotifications = async () => {
+    if (!user) return;
+    const { count, error } = await supabase
+      .from('orders')
+      .select('*', { count: 'exact', head: true })
+      .eq('user_id', user.id)
+      .eq('client_viewed_status', false);
+    
+    if (!error) {
+      setHasNotifications((count || 0) > 0);
+    }
+  };
+
   const fetchProducts = async () => {
+    checkNotifications();
     try {
       setLoading(true);
       const { data, error } = await supabase
@@ -92,13 +110,13 @@ export default function HomeScreen({ onProductPress, onNavigateToCart, onNavigat
           name: p.name,
           price: `$${parseFloat(p.price).toLocaleString()}`,
           priceValue: parseFloat(p.price),
-          rating: 4.5 + Math.random() * 0.5, // Mock rating since it's not in DB yet
+          rating: 4.5 + Math.random() * 0.5,
           image: p.image_url || 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=500&q=80',
-          category: p.category || 'Otros'
+          category: p.category || 'Otros',
+          description: p.description || ''
         }));
         setProducts(formattedProducts);
       } else {
-        // Si no hay productos en DB, mostramos los iniciales como demo
         setProducts(INITIAL_PRODUCTS);
       }
     } catch (error) {
@@ -112,7 +130,25 @@ export default function HomeScreen({ onProductPress, onNavigateToCart, onNavigat
 
   React.useEffect(() => {
     fetchProducts();
-  }, []);
+    
+    if (user) {
+      const subscription = supabase
+        .channel(`user-notifications-${user.id}`)
+        .on('postgres_changes', { 
+          event: '*', 
+          schema: 'public', 
+          table: 'orders',
+          filter: `user_id=eq.${user.id}`
+        }, () => {
+          checkNotifications();
+        })
+        .subscribe();
+
+      return () => {
+        subscription.unsubscribe();
+      };
+    }
+  }, [user]);
 
   const onRefresh = () => {
     setRefreshing(true);
@@ -133,16 +169,16 @@ export default function HomeScreen({ onProductPress, onNavigateToCart, onNavigat
           <TouchableOpacity style={styles.iconBtn} onPress={() => onNavigateToLanding()}>
             <Text style={styles.iconEmoji}>🚪</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.iconBtn}>
-            <Text style={styles.iconEmoji}>🔔</Text>
+          <TouchableOpacity style={styles.iconBtn} onPress={() => onNavigate('MyOrders')}>
+            <Text style={styles.iconEmoji}>📋</Text>
+            {hasNotifications ? (
+              <View style={styles.notificationDot} />
+            ) : null}
           </TouchableOpacity>
           <TouchableOpacity style={styles.iconBtn} onPress={onNavigateToCart}>
-            <Text style={styles.iconEmoji}>🛒</Text>
-            {cartItemsCount > 0 && (
-              <View style={styles.badge}>
-                 <Text style={styles.badgeText}>{cartItemsCount}</Text>
-              </View>
-            )}
+            <Text style={styles.iconEmoji}>🛒</Text>{cartItemsCount > 0 ? (
+              <View style={styles.badge}><Text style={styles.badgeText}>{cartItemsCount}</Text></View>
+            ) : null}
           </TouchableOpacity>
         </View>
       </View>
@@ -275,6 +311,7 @@ const styles = StyleSheet.create({
   iconEmoji: { fontSize: 20 },
   badge: { position: 'absolute', top: -5, right: -5, backgroundColor: '#ef4444', borderRadius: 10, minWidth: 20, height: 20, justifyContent: 'center', alignItems: 'center', borderWidth: 2, borderColor: '#ffffff'},
   badgeText: { color: '#ffffff', fontSize: 10, fontWeight: 'bold' },
+  notificationDot: { position: 'absolute', top: 5, right: 5, width: 12, height: 12, backgroundColor: '#ef4444', borderRadius: 6, borderWidth: 2, borderColor: '#ffffff' },
   searchContainer: { paddingHorizontal: 20, paddingTop: 20 },
   searchBar: {
     flexDirection: 'row', alignItems: 'center', backgroundColor: '#f1f5f9',

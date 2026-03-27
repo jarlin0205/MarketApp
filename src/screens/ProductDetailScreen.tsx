@@ -30,11 +30,11 @@ export default function ProductDetailScreen({ product, onBack, onNavigateToCart 
         <Text style={styles.headerTitle}>Detalle</Text>
         <TouchableOpacity style={styles.iconBtn} onPress={onNavigateToCart}>
            <Text style={styles.iconEmoji}>🛒</Text>
-           {cartItemsCount > 0 && (
+           {cartItemsCount > 0 ? (
              <View style={styles.badge}>
                 <Text style={styles.badgeText}>{cartItemsCount}</Text>
              </View>
-           )}
+           ) : null}
         </TouchableOpacity>
       </View>
 
@@ -60,9 +60,7 @@ export default function ProductDetailScreen({ product, onBack, onNavigateToCart 
             <Text style={styles.price}>{product.price}</Text>
 
             <Text style={styles.sectionTitle}>Descripción</Text>
-            <Text style={styles.description}>
-              {product.description || 'Producto premium de alta calidad. Diseñado con los mejores materiales para asegurar durabilidad y estilo. Perfecto para elevar tu experiencia diaria.'}
-            </Text>
+            <Text style={styles.description}>{product.description || 'Producto premium de alta calidad. Diseñado con los mejores materiales para asegurar durabilidad y estilo. Perfecto para elevar tu experiencia diaria.'}</Text>
 
             <View style={styles.divider} />
 

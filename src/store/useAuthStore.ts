@@ -2,16 +2,14 @@ import { create } from 'zustand';
 
 interface AuthState {
   user: any | null;
-  isAdmin: boolean;
-  setUser: (user: any | null) => void;
-  setAdmin: (isAdmin: boolean) => void;
+  role: 'client' | 'admin' | 'repartidor' | null;
+  setUser: (user: any | null, role?: string) => void;
   logout: () => void;
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
   user: null,
-  isAdmin: false,
-  setUser: (user) => set({ user }),
-  setAdmin: (isAdmin) => set({ isAdmin }),
-  logout: () => set({ user: null, isAdmin: false }),
+  role: null,
+  setUser: (user, role) => set({ user, role: (role as any) || 'client' }),
+  logout: () => set({ user: null, role: null }),
 }));

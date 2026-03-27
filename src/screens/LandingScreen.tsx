@@ -22,6 +22,7 @@ export default function LandingScreen({ onNavigate }: { onNavigate: (screen: str
   const [loginVisible, setLoginVisible] = useState(false);
   const [signupVisible, setSignupVisible] = useState(false);
   const [adminVisible, setAdminVisible] = useState(false);
+  const [staffRole, setStaffRole] = useState<'admin' | 'repartidor'>('admin');
   
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -29,7 +30,6 @@ export default function LandingScreen({ onNavigate }: { onNavigate: (screen: str
   const [loading, setLoading] = useState(false);
   
   const setUser = useAuthStore(state => state.setUser);
-  const setAdmin = useAuthStore(state => state.setAdmin);
 
   const validateEmail = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 
@@ -40,15 +40,52 @@ export default function LandingScreen({ onNavigate }: { onNavigate: (screen: str
     setLoading(true);
     try {
       const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-      setLoading(false);
 
       if (error) {
+        setLoading(false);
         Alert.alert("Error de Acceso", error.message);
       } else {
-        setUser(data.user);
-        setAdmin(false);
+        // Obtener rol del perfil
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('role')
+          .eq('id', data.user.id)
+          .single();
+        
+        const userRole = profile?.role || 'client';
+        
+        // Phase 26: Verificar Lista Blanca si es nuevo o el rol es 'client'
+        if (userRole === 'client') {
+          const { data: preAuth } = await supabase
+            .from('staff_pre_auth')
+            .select('role, phone')
+            .eq('email', email)
+            .single();
+          
+          if (preAuth) {
+            await supabase.from('profiles').update({ 
+              role: preAuth.role,
+              phone: preAuth.phone || null
+            }).eq('id', data.user.id);
+            await supabase.from('staff_pre_auth').delete().eq('email', email);
+            setUser(data.user, preAuth.role);
+            setLoading(false);
+            setLoginVisible(false);
+            if (preAuth.role === 'admin') onNavigate('AdminDashboard');
+            else onNavigate('DeliveryDashboard');
+            return;
+          }
+        }
+
+        setUser(data.user, userRole);
+        
+        setLoading(false);
         setLoginVisible(false);
-        onNavigate('Home');
+        
+        // Redirigir según rol
+        if (userRole === 'admin') onNavigate('AdminDashboard');
+        else if (userRole === 'repartidor') onNavigate('DeliveryDashboard');
+        else onNavigate('Home');
       }
     } catch (err: any) {
       setLoading(false);
@@ -72,7 +109,25 @@ export default function LandingScreen({ onNavigate }: { onNavigate: (screen: str
 
       if (error) {
         Alert.alert("Error en Registro", error.message);
-      } else {
+      } else if (data.user) {
+        // Phase 26: Verificar Lista Blanca inmediatamente después del registro
+        const { data: preAuth } = await supabase
+          .from('staff_pre_auth')
+          .select('role, phone')
+          .eq('email', email)
+          .single();
+        
+        if (preAuth) {
+          // Esperar un momento a que el trigger cree el perfil
+          setTimeout(async () => {
+            await supabase.from('profiles').update({ 
+              role: preAuth.role,
+              phone: preAuth.phone || null
+            }).eq('id', data.user!.id);
+            await supabase.from('staff_pre_auth').delete().eq('email', email);
+          }, 1000);
+        }
+
         Alert.alert("¡Éxito!", "Cuenta creada. Por favor verifica tu correo.");
         setSignupVisible(false);
       }
@@ -82,15 +137,15 @@ export default function LandingScreen({ onNavigate }: { onNavigate: (screen: str
     }
   };
 
-  const handleAdminLogin = () => {
-    // Credenciales por defecto solicitadas por el usuario
+  const handleStaffLogin = async () => {
+    // Si es el admin por defecto solicitado por el usuario
     if (email === 'admin@marketapp.pro' && password === 'Admin123!') {
-      setAdmin(true);
-      setUser({ email: 'admin@marketapp.pro', role: 'admin' });
+      setUser({ email, id: 'admin-manual' }, 'admin');
       setAdminVisible(false);
       onNavigate('AdminDashboard');
     } else {
-      Alert.alert("Acceso Denegado", "Credenciales de administrador inválidas.");
+      // Intentar login normal para repartidores/admin en DB
+      handleLogin();
     }
   };
 
@@ -126,9 +181,17 @@ export default function LandingScreen({ onNavigate }: { onNavigate: (screen: str
                 <Text style={styles.secondaryButtonText}>Crear una Cuenta</Text>
               </TouchableOpacity>
 
-              <TouchableOpacity style={styles.adminLink} onPress={() => setAdminVisible(true)}>
-                <Text style={styles.adminLinkText}>Acceso Administrativo 🔒</Text>
-              </TouchableOpacity>
+              <View style={styles.staffAccessRow}>
+                <TouchableOpacity style={styles.adminLink} onPress={() => { setStaffRole('admin'); setAdminVisible(true); }}>
+                  <Text style={styles.adminLinkText}>Acceso Administrador 🔒</Text>
+                </TouchableOpacity>
+                
+                <View style={styles.dividerDots} />
+
+                <TouchableOpacity style={styles.adminLink} onPress={() => { setStaffRole('repartidor'); setAdminVisible(true); }}>
+                  <Text style={styles.adminLinkText}>Acceso Repartidor 🛵</Text>
+                </TouchableOpacity>
+              </View>
             </View>
           </View>
         </View>
@@ -176,13 +239,14 @@ export default function LandingScreen({ onNavigate }: { onNavigate: (screen: str
         </TouchableWithoutFeedback>
       </Modal>
 
-      {/* ADMIN MODAL */}
       <Modal visible={adminVisible} animationType="fade" transparent>
         <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
           <View style={styles.modalOverlay}>
             <View style={[styles.modalContent, { height: '50%', borderTopLeftRadius: 0, borderTopRightRadius: 0, borderRadius: 24, margin: 20 }]}>
               <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>Panel de Control ⚙️</Text>
+                <Text style={styles.modalTitle}>
+                  {staffRole === 'admin' ? 'Panel de Control ⚙️' : 'Ingreso Repartidor 🛵'}
+                </Text>
                 <TouchableOpacity onPress={() => setAdminVisible(false)} style={styles.closeBtn}>
                   <Text style={styles.closeText}>✕</Text>
                 </TouchableOpacity>
@@ -203,8 +267,8 @@ export default function LandingScreen({ onNavigate }: { onNavigate: (screen: str
                   onChangeText={setPassword}
                   secureTextEntry
                 />
-                <TouchableOpacity style={[styles.submitBtn, { backgroundColor: '#0f172a' }]} onPress={handleAdminLogin}>
-                  <Text style={styles.submitBtnText}>Autenticar Admin</Text>
+                <TouchableOpacity style={[styles.submitBtn, { backgroundColor: '#0f172a' }]} onPress={handleStaffLogin} disabled={loading}>
+                  {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.submitBtnText}>Entrar como {staffRole === 'admin' ? 'Administrador' : 'Repartidor'}</Text>}
                 </TouchableOpacity>
               </View>
             </View>
@@ -272,8 +336,10 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: 'rgba(255,255,255,0.3)', marginBottom: 20
   },
   secondaryButtonText: { color: '#ffffff', fontSize: 16, fontWeight: '700' },
-  adminLink: { alignSelf: 'center', padding: 8 },
-  adminLinkText: { color: '#94a3b8', fontSize: 13, fontWeight: '500', textDecorationLine: 'underline' },
+  adminLink: { paddingHorizontal: 12, paddingVertical: 8 },
+  adminLinkText: { color: '#94a3b8', fontSize: 13, fontWeight: '600', textDecorationLine: 'underline' },
+  staffAccessRow: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 5, marginTop: 10 },
+  dividerDots: { width: 4, height: 4, borderRadius: 2, backgroundColor: '#475569', marginHorizontal: 4 },
 
   // MODAL STYLES
   modalOverlay: { flex: 1, backgroundColor: 'rgba(15, 23, 42, 0.8)', justifyContent: 'center' },

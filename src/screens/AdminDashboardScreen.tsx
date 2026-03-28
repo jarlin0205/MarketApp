@@ -11,13 +11,21 @@ import {
   Platform,
   Modal,
   ActivityIndicator,
-  Alert
+  Alert,
+  KeyboardAvoidingView
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { supabase } from '../lib/supabase';
+import { createClient } from '@supabase/supabase-js';
+import { useAuthStore } from '../store/useAuthStore';
 
-export default function AdminDashboardScreen({ onBack, onViewShop }: { onBack: () => void, onViewShop: () => void }) {
-  const [activeTab, setActiveTab] = useState<'inventory' | 'sales' | 'orders' | 'categories' | 'repartidores'>('inventory');
+export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCount = 0, onResetAdminUnread }: { 
+  onBack: () => void; 
+  onViewShop: () => void;
+  adminUnreadCount?: number;
+  onResetAdminUnread?: () => void;
+}) {
+  const [activeTab, setActiveTab] = useState<'inventory' | 'sales' | 'orders' | 'categories' | 'repartidores' | 'settlements'>('inventory');
   const [inventory, setInventory] = useState<any[]>([]);
   const [orders, setOrders] = useState<any[]>([]);
   const [reviews, setReviews] = useState<any[]>([]);
@@ -65,54 +73,125 @@ export default function AdminDashboardScreen({ onBack, onViewShop }: { onBack: (
   const [repModalVisible, setRepModalVisible] = useState(false);
   const [repEmail, setRepEmail] = useState('');
   const [repName, setRepName] = useState('');
+  const [repCountryCode, setRepCountryCode] = useState('+57');
   const [repPhone, setRepPhone] = useState('');
+  const [repPassword, setRepPassword] = useState('');
   const [repSaving, setRepSaving] = useState(false);
+  const [showRepPassword, setShowRepPassword] = useState(false);
+  const [editingRepId, setEditingRepId] = useState<string | null>(null);
+  const [settlements, setSettlements] = useState<any[]>([]);
+  const [loadingSettlements, setLoadingSettlements] = useState(false);
+  const [selectedSettlement, setSelectedSettlement] = useState<any | null>(null);
+  const [settlementOrders, setSettlementOrders] = useState<any[]>([]);
+  const [viewingSettlementDetails, setViewingSettlementDetails] = useState(false);
+
+  // Phase 30: Custom Settlement Validation Modal
+  const [isSettlementConfirmVisible, setIsSettlementConfirmVisible] = useState(false);
+  const [confirmingData, setConfirmingData] = useState<{ rep: any, stats: any } | null>(null);
+  const [closingJornada, setClosingJornada] = useState(false);
+  const [realTimeStatus, setRealTimeStatus] = useState<'connecting' | 'connected' | 'error'>('connecting');
+
+  const fetchInventory = async () => {
+    const { data } = await supabase.from('products').select('*').order('created_at', { ascending: false });
+    setInventory(data || []);
+  };
+
+  const fetchOrders = async (silent = false) => {
+    try {
+      if (!silent) setLoading(true);
+      const { data } = await supabase.from('orders').select('*, order_reviews(*)').order('created_at', { ascending: false });
+      setOrders(data || []);
+      const pending = data ? data.filter((o: any) => o.status === 'Pendiente').sort((a: any, b: any) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()) : [];
+      setPendingOrders(pending);
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  };
+
+  const fetchRepartidores = async () => {
+    const { data: reps } = await supabase.from('profiles').select('*').eq('role', 'repartidor').order('full_name', { ascending: true });
+    setRepartidores(reps || []);
+    const { data: invites } = await supabase.from('staff_pre_auth').select('*');
+    setPendingInvites(invites || []);
+  };
+
+  const fetchSettlements = async () => {
+    const { data } = await (supabase as any).from('shift_settlements').select('*, profiles(full_name)').order('created_at', { ascending: false });
+    setSettlements(data || []);
+  };
+
+  const fetchAuxiliar = async () => {
+     const { data: revData } = await (supabase as any).from('order_reviews').select('*, orders(customer_name)').order('created_at', { ascending: false });
+     setReviews(revData || []);
+     const { data: catData } = await supabase.from('categories').select('*').order('name', { ascending: true });
+     setCategories(catData || []);
+  };
 
   const fetchData = async () => {
     try {
       setLoading(true);
-      const { data: invData } = await supabase.from('products').select('*').order('created_at', { ascending: false });
-      setInventory(invData || []);
-
-      const { data: ordData } = await supabase.from('orders').select('*, order_reviews(*)').order('created_at', { ascending: false });
-      setOrders(ordData || []);
-
-      const { data: revData } = await supabase.from('order_reviews').select('*, orders(customer_name)').order('created_at', { ascending: false });
-      setReviews(revData || []);
-
-      const { data: catData } = await supabase.from('categories').select('*').order('name', { ascending: true });
-      setCategories(catData || []);
-
-      const recOrders = ordData ? ordData.filter((o: any) => o.status === 'Pendiente').sort((a: any, b: any) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()) : [];
-      setPendingOrders(recOrders);
-
-      // 3. Repartidores (Profiles with role = 'repartidor')
-      const { data: reps } = await supabase.from('profiles').select('*').eq('role', 'repartidor').order('full_name', { ascending: true });
-      setRepartidores(reps || []);
-
-      // 4. Invitaciones Pendientes (Lista Blanca)
-      const { data: invites } = await supabase.from('staff_pre_auth').select('*');
-      setPendingInvites(invites || []);
+      await Promise.all([
+        fetchInventory(),
+        fetchOrders(true),
+        fetchRepartidores(),
+        fetchSettlements(),
+        fetchAuxiliar()
+      ]);
     } catch (error) {
-      console.error('Error fetching admin data:', error);
+      console.error('Error in fetchData:', error);
     } finally {
       setLoading(false);
     }
   };
 
   React.useEffect(() => {
+    // Carga inicial
     fetchData();
+
+    // Sistema de Polling (Respaldo de seguridad cada 30s)
+    const pollInterval = setInterval(() => fetchData(), 30000);
+
+    // Suscripción Real-time de Ultra-Baja Latencia 🚀
     const subscription = supabase
-      .channel('admin-orders')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, (payload) => {
-        fetchData();
-        if (payload.eventType === 'INSERT') {
-           Alert.alert("🔔 ¡Nuevo Pedido!", "Se ha recibido un nuevo pedido en la tienda.");
+      .channel('admin-live-orders-v3') 
+      .on(
+        'postgres_changes', 
+        { event: '*', schema: 'public', table: 'orders' }, 
+        (payload: any) => {
+          console.log('🔔 Evento Real-time:', payload.eventType);
+          
+          if (payload.eventType === 'INSERT') {
+             const newOrder = payload.new;
+             // 1. INYECCIÓN DIRECTA (instantánea en segundos)
+             setOrders(prev => [newOrder, ...prev]);
+             if (newOrder.status === 'Pendiente') {
+                setPendingOrders(prev => [...prev, newOrder].sort((a: any, b: any) => 
+                  new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+                ));
+             }
+             
+             // 2. REFRESH LIGERO (solo órdenes, no toda la base de datos)
+             fetchOrders(true);
+
+             Alert.alert(
+               "🔔 ¡Nuevo Pedido Entrante!", 
+               `Cliente: ${newOrder.customer_name || 'Desconocido'}\nMonto: $${parseFloat(newOrder.total).toLocaleString()}`,
+               [{ text: "Ver Pedidos", onPress: () => { setNotifModalVisible(true); fetchOrders(true); } }]
+             );
+          } else {
+             // Si el estado de la orden cambia, solo refrescamos órdenes
+             fetchOrders(true);
+          }
         }
-      })
-      .subscribe();
+      )
+      .subscribe((status) => {
+        console.log('📡 Status:', status);
+        if (status === 'SUBSCRIBED') setRealTimeStatus('connected');
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') setRealTimeStatus('error');
+      });
 
     return () => {
+      clearInterval(pollInterval);
       subscription.unsubscribe();
     };
   }, []);
@@ -184,9 +263,17 @@ export default function AdminDashboardScreen({ onBack, onViewShop }: { onBack: (
     if (!order) return;
 
     // Blindaje: No permitir retroceder si ya está en estados finales
-    const finalStates = ['Entregado', 'Confirmado'];
-    if (finalStates.includes(order.status)) {
-      return Alert.alert("Acción Bloqueada", "Este pedido ya ha sido finalizado y no puede volver a estados anteriores.");
+    const finalStates = ['Entregado', 'Confirmado', 'Cancelado'];
+    if (finalStates.includes(order.status) && newStatus !== 'Cancelado') {
+      return Alert.alert("Acción Bloqueada", "Este pedido ya ha sido finalizado.");
+    }
+
+    if (newStatus === 'Cancelado') {
+       const { error } = await supabase.from('orders').update({ status: 'Cancelado', client_viewed_status: false }).eq('id', id);
+       if (!error) {
+          fetchOrders(true);
+          return;
+       }
     }
 
     // Si el administrador "Atiende", pasamos directo a Preparación
@@ -206,7 +293,7 @@ export default function AdminDashboardScreen({ onBack, onViewShop }: { onBack: (
       if (newStatus === 'Recibida' || newStatus === 'Preparación') {
         startChecklist(id);
       }
-      fetchData();
+      fetchOrders(true);
     }
   };
 
@@ -247,35 +334,112 @@ export default function AdminDashboardScreen({ onBack, onViewShop }: { onBack: (
     setIsRepPickerVisible(true);
   };
 
+  const handleDeleteRepartidor = (rep: any) => {
+    Alert.alert(
+      "Eliminar Repartidor 🗑️",
+      `¿Estás seguro de que deseas revocar el acceso a ${rep.full_name || 'este repartidor'}?\n\nPerderá su acceso a la plataforma de envíos inmediatamente.`,
+      [
+        { text: "Cancelar", style: "cancel" },
+        { 
+          text: "Eliminar", 
+          style: "destructive", 
+          onPress: async () => {
+            const { error } = await supabase.from('profiles').update({ role: 'client' }).eq('id', rep.id);
+            if (error) Alert.alert("Error", error.message);
+            else {
+              Alert.alert("Éxito", "El usuario ya no es repartidor.");
+              fetchData();
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const openEditRepForm = (rep: any) => {
+    setEditingRepId(rep.id);
+    setRepName(rep.full_name || '');
+    
+    // Extraer código de país +57 322...
+    if (rep.phone && rep.phone.startsWith('+')) {
+      const parts = rep.phone.split(' ');
+      setRepCountryCode(parts[0]);
+      setRepPhone(parts.slice(1).join(' '));
+    } else {
+      setRepCountryCode('+57');
+      setRepPhone(rep.phone || '');
+    }
+    
+    // Phase 41: Priorizar Username sobre Email (para rescatar legados)
+    setRepEmail(rep.username || '');
+    
+    setRepPassword('');
+    setRepModalVisible(true);
+  };
+
   const handleStaffCreation = async () => {
-    if (!repEmail || !repName || !repPhone) return Alert.alert("Error", "Completa nombre, correo y teléfono.");
-    if (!repEmail.includes('@')) return Alert.alert("Error", "Correo inválido.");
+    if (!repName || !repPhone || !repCountryCode || (!editingRepId && !repEmail)) {
+      return Alert.alert("Error", "Completa nombre, teléfono y usuario.");
+    }
+    
+    if (!editingRepId && !repPassword) {
+      return Alert.alert("Error", "Debes asignar una contraseña para el nuevo repartidor.");
+    }
+    
+    if (!editingRepId && repPassword.length < 6) {
+      return Alert.alert("Error", "La contraseña debe tener mínimo 6 caracteres.");
+    }
     
     setRepSaving(true);
     try {
-      // 1. Verificar si ya existe para evitar duplicados
-      const { data: profile, error: userErr } = await supabase
-          .from('profiles')
-          .select('*')
-          .eq('email', repEmail)
-          .maybeSingle();
+      const fullPhone = `${repCountryCode.trim()} ${repPhone.trim()}`;
 
-      if (profile) {
-        await supabase.from('profiles').update({ role: 'repartidor', full_name: repName, phone: repPhone }).eq('email', repEmail);
-        Alert.alert("Éxito", "Usuario actualizado a repartidor.");
-      } else {
-        // Phase 26/27: Pre-autorización en Lista Blanca con Teléfono
-        const { error: inviteError } = await supabase
-          .from('staff_pre_auth')
-          .upsert({ email: repEmail, role: 'repartidor', phone: repPhone });
+      if (editingRepId) {
+        const updateData: any = { 
+          full_name: repName, 
+          phone: fullPhone 
+        };
         
-        if (inviteError) throw inviteError;
-        Alert.alert("Lista Blanca", "Mensajero pre-autorizado. Recibirá su rol y teléfono automático al registrarse.");
-      }
+        // Phase 41: Permitir setear username si no tenía
+        const currentRep = repartidores.find(r => r.id === editingRepId);
+        if (!currentRep?.username && repEmail) {
+          updateData.username = repEmail.trim().toLowerCase();
+        }
+
+        // Permitir actualización de clave local
+        if (repPassword && repPassword.length >= 6) {
+          updateData.messenger_password = repPassword;
+        }
+
+        await supabase.from('profiles').update(updateData).eq('id', editingRepId);
+        
+        Alert.alert("Éxito", "Perfil y credenciales actualizados correctamente.");
+      } else {
+        // Phase 41: Creación Directa usando RPC Server-Side para evitar límites de correo (429)
+        const { data: rpcData, error: rpcErr } = await (supabase.rpc as any)('create_repartidor', {
+          p_username: repEmail.trim().toLowerCase(),
+          p_password: repPassword,
+          p_full_name: repName,
+          p_phone: fullPhone
+        });
+        
+        if (rpcErr) throw rpcErr;
+        
+        if (rpcData && rpcData.error) {
+          Alert.alert("Error", rpcData.error);
+          return;
+        }
+
+        Alert.alert("¡Éxito!", `Repartidor creado exitosamente. Ya puede iniciar sesión con el usuario "${repEmail.trim().toLowerCase()}".`);
+      } 
+      // <-- Cierre del else principal
+      
       setRepModalVisible(false);
+      setEditingRepId(null);
       setRepEmail('');
       setRepName('');
       setRepPhone('');
+      setRepPassword('');
       fetchData();
     } catch (err: any) {
       Alert.alert("Error", err.message);
@@ -491,18 +655,29 @@ export default function AdminDashboardScreen({ onBack, onViewShop }: { onBack: (
   );
 
   const renderRepartidores = () => {
-    const repartidorStats: { [key: string]: { entregas: number; recaudado: number; total_tiempo: number } } = {};
+    const repartidorStats: { [key: string]: { entregas: number; pendientes: number; recaudado: number; total_tiempo: number } } = {};
 
     orders.forEach(order => {
-      if (order.repartidor_id && order.status === 'Entregado') {
+      // Solo sumamos a las estadísticas activas lo que NO ha sido liquidado
+      if (order.repartidor_id && !order.is_settled) {
         if (!repartidorStats[order.repartidor_id]) {
-          repartidorStats[order.repartidor_id] = { entregas: 0, recaudado: 0, total_tiempo: 0 };
+          repartidorStats[order.repartidor_id] = { entregas: 0, pendientes: 0, recaudado: 0, total_tiempo: 0 };
         }
-        repartidorStats[order.repartidor_id].entregas += 1;
-        repartidorStats[order.repartidor_id].recaudado += parseFloat(order.total);
-        if (order.delivered_at && order.shipped_at) {
-          const diff = new Date(order.delivered_at).getTime() - new Date(order.shipped_at).getTime();
-          repartidorStats[order.repartidor_id].total_tiempo += (diff / 1000 / 60);
+
+        const isDelivered = ['Entregado', 'Confirmado'].includes(order.status);
+        const isPending = order.status === 'Enviado';
+
+        if (isDelivered) {
+          repartidorStats[order.repartidor_id].entregas += 1;
+          repartidorStats[order.repartidor_id].recaudado += parseFloat(order.total || 0);
+          
+          if (order.delivered_at && order.shipped_at) {
+            const diff = new Date(order.delivered_at).getTime() - new Date(order.shipped_at).getTime();
+            const minutes = Math.max(0, diff / 1000 / 60);
+            repartidorStats[order.repartidor_id].total_tiempo += minutes;
+          }
+        } else if (isPending) {
+          repartidorStats[order.repartidor_id].pendientes += 1;
         }
       }
     });
@@ -512,7 +687,7 @@ export default function AdminDashboardScreen({ onBack, onViewShop }: { onBack: (
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Gestión de Mensajeros 🛵</Text>
           <TouchableOpacity style={styles.addButton} onPress={() => setRepModalVisible(true)}>
-            <Text style={styles.addButtonText}>+ Nuevo Mensajero / Repartidor</Text>
+            <Text style={styles.addButtonText}>+ Nuevo Mensajero</Text>
           </TouchableOpacity>
         </View>
 
@@ -521,18 +696,30 @@ export default function AdminDashboardScreen({ onBack, onViewShop }: { onBack: (
         ) : (
           <>
             {repartidores.map(rep => {
-               const stats = repartidorStats[rep.id] || { entregas: 0, recaudado: 0, total_tiempo: 0 };
+               const stats = repartidorStats[rep.id] || { entregas: 0, pendientes: 0, recaudado: 0, total_tiempo: 0 };
                const avgTime = stats.entregas > 0 ? (stats.total_tiempo / stats.entregas).toFixed(1) : '0';
+               const isPendingClosure = rep.shift_status === 'pending_closure';
                return (
                 <View key={rep.id} style={styles.repCard}>
-                  <View style={styles.repInfo}>
-                    <Text style={styles.repName}>{rep.full_name || 'Sin nombre'}</Text>
-                    <Text style={styles.repEmail}>{rep.email}</Text>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                    <View style={styles.repInfo}>
+                      <Text style={styles.repName}>{rep.full_name || 'Sin nombre'}</Text>
+                      {rep.email && <Text style={styles.repEmail}>Usuario: {rep.email.replace('@repartidor.local', '')}</Text>}
+                      {rep.phone && <Text style={styles.repEmail}>📞 {rep.phone}</Text>}
+                    </View>
+                    <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center' }}>
+                      <TouchableOpacity onPress={() => openEditRepForm(rep)} style={{ padding: 5 }}>
+                        <Text style={{ fontSize: 18 }}>✏️</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity onPress={() => handleDeleteRepartidor(rep)} style={{ padding: 5 }}>
+                        <Text style={{ fontSize: 18 }}>🗑️</Text>
+                      </TouchableOpacity>
+                    </View>
                   </View>
                   <View style={styles.repStatsRow}>
                     <View style={styles.repStatItem}>
-                      <Text style={styles.repStatVal}>{stats.entregas}</Text>
-                      <Text style={styles.repStatLab}>Pedidos</Text>
+                      <Text style={styles.repStatVal}>{stats.entregas} | {stats.pendientes}</Text>
+                      <Text style={styles.repStatLab}>Entr. | Pend.</Text>
                     </View>
                     <View style={styles.repStatItem}>
                       <Text style={styles.repStatVal}>${stats.recaudado.toLocaleString()}</Text>
@@ -540,11 +727,23 @@ export default function AdminDashboardScreen({ onBack, onViewShop }: { onBack: (
                     </View>
                     <View style={styles.repStatItem}>
                       <Text style={styles.repStatVal}>{avgTime}m</Text>
-                      <Text style={styles.repStatLab}>Promedio</Text>
+                      <Text style={styles.repStatLab}>Promedio Entrega</Text>
                     </View>
                   </View>
+
+                  {isPendingClosure && (
+                    <TouchableOpacity 
+                      style={styles.approveClosureBtn}
+                      onPress={() => {
+                        setConfirmingData({ rep, stats });
+                        setIsSettlementConfirmVisible(true);
+                      }}
+                    >
+                      <Text style={styles.approveClosureText}>VALIDAR $ Y CERRAR JORNADA ✅</Text>
+                    </TouchableOpacity>
+                  )}
                 </View>
-               );
+              );
             })}
 
             {pendingInvites.filter((invite: any) => invite.role === 'repartidor').length > 0 && (
@@ -576,6 +775,194 @@ export default function AdminDashboardScreen({ onBack, onViewShop }: { onBack: (
     );
   };
 
+  const renderSettlements = () => {
+    // Agrupar liquidaciones por fecha
+    const grouped = settlements.reduce((acc: any, curr: any) => {
+      const date = new Date(curr.created_at).toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' });
+      if (!acc[date]) acc[date] = [];
+      acc[date].push(curr);
+      return acc;
+    }, {});
+
+    return (
+      <ScrollView style={styles.tabContent}>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Historial de Liquidaciones 📑</Text>
+        </View>
+        
+        {Object.keys(grouped).length === 0 ? (
+          <Text style={styles.emptyText}>No hay liquidaciones registradas aún.</Text>
+        ) : Object.keys(grouped).map(date => (
+          <View key={date}>
+            <Text style={styles.settlementDateHeader}>{date}</Text>
+            {grouped[date].map((sett: any) => (
+              <TouchableOpacity key={sett.id} style={styles.settlementItem} onPress={() => openSettlementDetails(sett)}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.settlementUser}>🛵 {sett.profiles?.full_name || 'Desconocido'}</Text>
+                  <Text style={styles.settlementOrders}>{sett.orders_count} pedidos liquidados</Text>
+                  <View style={[styles.settlementBadge, { backgroundColor: sett.status === 'approved' ? '#dcfce7' : '#fef3c7' }]}>
+                    <Text style={[styles.settlementBadgeText, { color: sett.status === 'approved' ? '#166534' : '#92400e' }]}>
+                      {sett.status === 'approved' ? '✓ LIQUIDADO' : '⏳ PENDIENTE'}
+                    </Text>
+                  </View>
+                </View>
+                <View style={{ alignItems: 'flex-end' }}>
+                   <Text style={styles.settlementAmount}>${parseFloat(sett.total_amount).toLocaleString()}</Text>
+                   <Text style={{ fontSize: 10, color: '#94a3b8' }}>{new Date(sett.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>
+                </View>
+              </TouchableOpacity>
+            ))}
+          </View>
+        ))}
+      </ScrollView>
+    );
+  };
+
+  const openSettlementDetails = async (settlement: any) => {
+    try {
+      setLoading(true);
+      const { data, error } = await (supabase as any)
+        .from('orders')
+        .select('*, order_reviews(*)')
+        .eq('settlement_id', settlement.id);
+      if (error) throw error;
+      setSelectedSettlement(settlement);
+      setSettlementOrders(data || []);
+      setViewingSettlementDetails(true);
+    } catch (e: any) {
+      Alert.alert("Error", e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const renderSettlementDetailsModal = () => (
+    <Modal visible={viewingSettlementDetails} animationType="slide" transparent>
+      <View style={styles.modalOverlay}>
+        <View style={[styles.modalContent, { height: '85%' }]}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Detalle de Liquidación 📑</Text>
+            <TouchableOpacity onPress={() => setViewingSettlementDetails(false)}>
+              <Text style={{ fontSize: 24 }}>✕</Text>
+            </TouchableOpacity>
+          </View>
+
+          {selectedSettlement && (
+            <ScrollView showsVerticalScrollIndicator={false}>
+              <View style={styles.settlementDetailHeader}>
+                <Text style={styles.settlementDetailUser}>Mensajero: {selectedSettlement.profiles?.full_name}</Text>
+                <Text style={styles.settlementDetailTotal}>Total Recibido: ${parseFloat(selectedSettlement.total_amount).toLocaleString()}</Text>
+                <Text style={styles.settlementDetailDate}>Fecha: {new Date(selectedSettlement.created_at).toLocaleString()}</Text>
+              </View>
+
+              <Text style={styles.sectionTitle}>Pedidos Incluidos</Text>
+              {settlementOrders.map(order => (
+                <View key={order.id} style={styles.settlementOrderCard}>
+                  <View style={styles.settlementOrderHeader}>
+                    <Text style={styles.settlementOrderTitle}>{order.customer_name}</Text>
+                    <Text style={styles.settlementOrderPrice}>${parseFloat(order.total).toLocaleString()}</Text>
+                  </View>
+                  <Text style={styles.settlementOrderInfo}>📍 {order.delivery_address}</Text>
+                  <Text style={styles.settlementOrderInfo}>🆔 #ORD-{order.id.substring(0,6).toUpperCase()}</Text>
+                  <Text style={styles.settlementOrderInfo}>🕒 Entregado: {order.delivered_at ? new Date(order.delivered_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--:--'}</Text>
+                  
+                  {order.order_reviews && order.order_reviews.length > 0 && (
+                    <View style={styles.settlementReviewBox}>
+                      <Text style={styles.settlementReviewRating}>⭐ {order.order_reviews[0].rating}/5</Text>
+                      <Text style={styles.settlementReviewComment}>"{order.order_reviews[0].comment || 'Sin comentario'}"</Text>
+                    </View>
+                  )}
+                </View>
+              ))}
+            </ScrollView>
+          )}
+        </View>
+      </View>
+    </Modal>
+  );
+
+  const renderSettlementConfirmModal = () => (
+    <Modal visible={isSettlementConfirmVisible} animationType="fade" transparent>
+      <View style={styles.modalOverlay}>
+         <View style={[styles.modalContent, { minHeight: '40%', padding: 30, borderRadius: 32 }]}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Confirmar Recaudo 💰</Text>
+              <TouchableOpacity onPress={() => setIsSettlementConfirmVisible(false)}>
+                <Text style={{ fontSize: 24 }}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            {confirmingData && (
+              <ScrollView showsVerticalScrollIndicator={false}>
+                <Text style={styles.confirmSubtitle}>¿Has recibido el dinero físico de manos del mensajero?</Text>
+                
+                <View style={styles.confirmDataBox}>
+                  <Text style={styles.confirmLabel}>Mensajero:</Text>
+                  <Text style={styles.confirmValue}>{confirmingData.rep.full_name}</Text>
+                  
+                  <View style={{ height: 15 }} />
+                  
+                  <Text style={styles.confirmLabel}>Monto a Recibir:</Text>
+                  <Text style={styles.confirmAmount}>${confirmingData.stats.recaudado.toLocaleString()}</Text>
+                </View>
+
+                <View style={styles.warningNote}>
+                  <Text style={styles.warningNoteText}>⚠️ Al confirmar, se cerrará la jornada del mensajero y se archivarán los pedidos como "Liquidados".</Text>
+                </View>
+
+                <View style={[styles.modalBtns, { marginTop: 30 }]}>
+                   <TouchableOpacity 
+                    style={[styles.modalBtn, styles.cancelBtn]} 
+                    onPress={() => setIsSettlementConfirmVisible(false)}
+                   >
+                     <Text style={styles.modalBtnText}>No, después</Text>
+                   </TouchableOpacity>
+
+                   <TouchableOpacity 
+                    style={[styles.modalBtn, { backgroundColor: '#166534' }]} 
+                    onPress={async () => {
+                      try {
+                        setClosingJornada(true);
+                        const { data: sett } = await (supabase as any)
+                          .from('shift_settlements')
+                          .select('id')
+                          .eq('messenger_id', confirmingData.rep.id)
+                          .eq('status', 'pending')
+                          .single();
+
+                        if (sett) {
+                          const { data: res } = await (supabase.rpc as any)('approve_shift_closure', { p_settlement_id: sett.id });
+                          if (res?.success) {
+                            setIsSettlementConfirmVisible(false);
+                            Alert.alert("¡Éxito! ✅", "Jornada liquidada y dinero registrado correctamente.");
+                            fetchData();
+                          } else {
+                            Alert.alert("Error", res?.error || "Error al liquidar");
+                          }
+                        } else {
+                          Alert.alert("Error", "No se encontró una solicitud pendiente para este mensajero.");
+                        }
+                      } catch (e: any) {
+                        Alert.alert("Error", e.message);
+                      } finally {
+                        setClosingJornada(false);
+                      }
+                    }}
+                   >
+                     {closingJornada ? (
+                       <ActivityIndicator color="#fff" />
+                     ) : (
+                       <Text style={{ color: '#fff', fontWeight: 'bold' }}>Sí, Recibido ✅</Text>
+                     )}
+                   </TouchableOpacity>
+                </View>
+              </ScrollView>
+            )}
+         </View>
+      </View>
+    </Modal>
+  );
+
   const renderOrders = () => (
     <View style={styles.tabContent}>
       <Text style={styles.sectionTitle}>Órdenes Recientes</Text>
@@ -595,8 +982,9 @@ export default function AdminDashboardScreen({ onBack, onViewShop }: { onBack: (
                 order.status === 'Pendiente' ? styles.statusPending :
                 order.status === 'Recibida' ? styles.statusReceived : 
                 order.status === 'Preparación' ? styles.statusPreparing :
-                order.status === 'Enviado' ? styles.statusShipped : styles.statusDone]}>
-                {order.status}
+                order.status === 'Enviado' ? styles.statusShipped : 
+                order.status === 'Cancelado' ? { backgroundColor: '#fee2e2', color: '#ef4444' } : styles.statusDone]}>
+                {order.status === 'Cancelado' ? 'No Disponible ✕' : order.status}
               </Text>
             </View>
             <View style={styles.orderBody}>
@@ -623,7 +1011,8 @@ export default function AdminDashboardScreen({ onBack, onViewShop }: { onBack: (
                   {['Preparación', 'Enviado'].map(st => {
                     const isPassed = (order.status === 'Enviado' && st === 'Preparación') || 
                                     order.status === 'Entregado' || 
-                                    order.status === 'Confirmado';
+                                    order.status === 'Confirmado' ||
+                                    order.status === 'Cancelado';
                     return (
                       <TouchableOpacity key={st} 
                         onPress={() => !isPassed && updateOrderStatus(order.id, st)}
@@ -635,6 +1024,11 @@ export default function AdminDashboardScreen({ onBack, onViewShop }: { onBack: (
                   {(order.status === 'Entregado' || order.status === 'Confirmado') && (
                     <View style={[styles.smallStatusBtn, styles.btnActive, { backgroundColor: '#16a34a', borderColor: '#16a34a' }]}>
                        <Text style={styles.textWhite}>✅ {order.status}</Text>
+                    </View>
+                  )}
+                  {order.status === 'Cancelado' && (
+                    <View style={[styles.smallStatusBtn, { backgroundColor: '#ef4444', borderColor: '#ef4444' }]}>
+                       <Text style={styles.textWhite}>No Disponible ✕</Text>
                     </View>
                   )}
                </View>
@@ -744,15 +1138,33 @@ export default function AdminDashboardScreen({ onBack, onViewShop }: { onBack: (
     <View style={styles.container}>
       <View style={styles.header}>
         <TouchableOpacity onPress={onBack} style={styles.backBtn}><Text style={styles.backText}>← Salir del Panel</Text></TouchableOpacity>
-        <Text style={styles.headerTitle}>Admin Panel 💎</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1, justifyContent: 'center' }}>
+          <View style={[
+            styles.rtIndicator, 
+            { backgroundColor: realTimeStatus === 'connected' ? '#22c55e' : realTimeStatus === 'error' ? '#ef4444' : '#f59e0b' }
+          ]} />
+          <Text style={styles.headerTitle}>Admin Panel 💎</Text>
+        </View>
         <View style={styles.headerRight}>
            <TouchableOpacity style={styles.shopBtn} onPress={onViewShop}>
              <Text style={styles.shopBtnText}>🛒 Ver Tienda</Text>
            </TouchableOpacity>
-           <TouchableOpacity style={styles.notifBell} onPress={() => setNotifModalVisible(true)}>
-             <Text style={{ fontSize: 24 }}>🔔</Text>
-             {pendingOrders.length > 0 ? (
-               <View style={styles.notifBadge}><Text style={styles.notifBadgeTextShort}>{pendingOrders.length > 9 ? '+9' : pendingOrders.length}</Text></View>
+           <TouchableOpacity 
+             style={styles.notifBell} 
+             onPress={() => {
+               if (onResetAdminUnread) onResetAdminUnread();
+               setNotifModalVisible(true);
+             }}
+           >
+             <Text style={{ fontSize: 24 }}>{adminUnreadCount > 0 ? '🔔' : '🔔'}</Text>
+             {adminUnreadCount > 0 ? (
+               <View style={styles.notifBadge}>
+                 <Text style={styles.notifBadgeTextShort}>{adminUnreadCount > 9 ? '+9' : adminUnreadCount}</Text>
+               </View>
+             ) : pendingOrders.length > 0 ? (
+               <View style={styles.notifBadge}>
+                 <Text style={styles.notifBadgeTextShort}>{pendingOrders.length > 9 ? '+9' : pendingOrders.length}</Text>
+               </View>
              ) : null}
            </TouchableOpacity>
         </View>
@@ -761,9 +1173,10 @@ export default function AdminDashboardScreen({ onBack, onViewShop }: { onBack: (
         {[
           { id: 'inventory', label: '📦 Stock' },
           { id: 'sales', label: '📊 Ventas' },
-          { id: 'orders', label: '🧾 Pedidos' },
-          { id: 'repartidores', label: '🛵 Flota' },
-          { id: 'categories', label: '🏷️ Tipos' }
+           { id: 'orders', label: '🧾 Pedidos' },
+           { id: 'repartidores', label: '🛵 Flota' },
+           { id: 'settlements', label: '📑 Liquid.' },
+           { id: 'categories', label: '🏷️ Tipos' }
         ].map((tab: any) => (
           <TouchableOpacity key={tab.id} style={[styles.tab, activeTab === tab.id && styles.activeTab]} onPress={() => setActiveTab(tab.id)}>
             <Text style={[styles.tabText, activeTab === tab.id && styles.activeTabText]}>
@@ -775,9 +1188,10 @@ export default function AdminDashboardScreen({ onBack, onViewShop }: { onBack: (
       <ScrollView style={styles.content}>
         {activeTab === 'inventory' ? renderInventory() : null}
         {activeTab === 'sales' ? renderSales() : null}
-        {activeTab === 'orders' ? renderOrders() : null}
-        {activeTab === 'repartidores' ? renderRepartidores() : null}
-        {activeTab === 'categories' ? renderCategories() : null}
+         {activeTab === 'orders' ? renderOrders() : null}
+         {activeTab === 'repartidores' ? renderRepartidores() : null}
+         {activeTab === 'categories' ? renderCategories() : null}
+         {activeTab === 'settlements' ? renderSettlements() : null}
       </ScrollView>
 
       {/* MODAL PARA PRODUCTO */}
@@ -832,9 +1246,59 @@ export default function AdminDashboardScreen({ onBack, onViewShop }: { onBack: (
                           <Text style={styles.notifAddress} numberOfLines={1}>📍 {order.delivery_address}</Text>
                           <Text style={styles.atenderBtnText}>Total: ${parseFloat(order.total).toLocaleString()}</Text>
                        </View>
-                       <TouchableOpacity style={styles.atenderBtn} onPress={() => { updateOrderStatus(order.id, 'Recibida'); if (pendingOrders.length === 1) setNotifModalVisible(false); }}>
-                          <Text style={styles.atenderBtnText}>Atender ✅</Text>
-                       </TouchableOpacity>
+                       <View style={{ gap: 8 }}>
+                          <TouchableOpacity 
+                            style={styles.atenderBtn} 
+                            onPress={() => { 
+                              updateOrderStatus(order.id, 'Recibida'); 
+                              if (pendingOrders.length === 1) {
+                                setNotifModalVisible(false);
+                              }
+                            }}
+                          >
+                             <Text style={styles.atenderBtnText}>Atender ✅</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity 
+                             style={[styles.atenderBtn, { backgroundColor: '#ef4444' }]} 
+                             onPress={() => {
+                               const performReject = async () => {
+                                 // 1. ACTUALIZACIÓN OPTIMISTA ⚡ (Inyección inmediata)
+                                 const updatedPending = pendingOrders.filter(p => p.id !== order.id);
+                                 setPendingOrders(updatedPending);
+                                 setOrders(prev => prev.filter(o => o.id !== order.id));
+                                 
+                                 // 2. Lógica de cierre corregida
+                                 if (updatedPending.length === 0) {
+                                   setNotifModalVisible(false);
+                                 }
+                                 
+                                 // 3. Ejecución en segundo plano
+                                 try { 
+                                   await updateOrderStatus(order.id, 'Cancelado'); 
+                                 } catch (e) { 
+                                   console.error('Error background reject:', e); 
+                                 }
+                               };
+
+                               if (Platform.OS === 'web') {
+                                 if (window.confirm(`¿Rechazar pedido #ORD-${order.id.substring(0,6).toUpperCase()}?`)) {
+                                   performReject();
+                                 }
+                               } else {
+                                 Alert.alert(
+                                   "Rechazar Pedido",
+                                   "¿Estás seguro de que deseas rechazar este pedido?",
+                                   [
+                                     { text: "No", style: "cancel" },
+                                     { text: "Sí", style: "destructive", onPress: performReject }
+                                   ]
+                                 );
+                               }
+                             }}
+                           >
+                              <Text style={styles.atenderBtnText}>Rechazar ✕</Text>
+                           </TouchableOpacity>
+                       </View>
                     </View>
                  ))}
               </ScrollView>
@@ -880,6 +1344,7 @@ export default function AdminDashboardScreen({ onBack, onViewShop }: { onBack: (
                 >
                   <View style={{ flex: 1 }}>
                     <Text style={[styles.repPickerName, selectedRepId === rep.id && styles.textWhite]}>{rep.full_name || 'Sin Nombre'}</Text>
+                    {rep.phone && <Text style={[styles.repPickerEmail, selectedRepId === rep.id && styles.textWhite]}>📞 {rep.phone}</Text>}
                     <Text style={[styles.repPickerEmail, selectedRepId === rep.id && styles.textWhite]}>{rep.email}</Text>
                   </View>
                   {selectedRepId === rep.id && <Text style={{ color: '#fff', fontSize: 20 }}>✓</Text>}
@@ -900,6 +1365,9 @@ export default function AdminDashboardScreen({ onBack, onViewShop }: { onBack: (
           </View>
         </View>
       </Modal>
+
+      {renderSettlementDetailsModal()}
+      {renderSettlementConfirmModal()}
 
       {/* MODAL DETALLES DEL PEDIDO (AUDITORÍA) */}
       <Modal visible={isDetailsModalVisible} animationType="fade" transparent>
@@ -974,30 +1442,70 @@ export default function AdminDashboardScreen({ onBack, onViewShop }: { onBack: (
         </View>
       </Modal>
 
-      {/* MODAL CREAR REPARTIDOR */}
+      {/* MODAL CREAR/EDITAR REPARTIDOR */}
       <Modal visible={repModalVisible} animationType="fade" transparent>
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { height: '65%' }]}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { height: '80%' }]}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Nuevo Mensajero 🛵</Text>
-              <TouchableOpacity onPress={() => setRepModalVisible(false)}><Text style={{ fontSize: 24 }}>✕</Text></TouchableOpacity>
+              <Text style={styles.modalTitle}>{editingRepId ? 'Editar Mensajero ✏️' : 'Nuevo Mensajero 🛵'}</Text>
+              <TouchableOpacity onPress={() => { setRepModalVisible(false); setEditingRepId(null); setRepEmail(''); setRepName(''); setRepPhone(''); setRepPassword(''); }}><Text style={{ fontSize: 24 }}>✕</Text></TouchableOpacity>
             </View>
-            <View style={styles.form}>
-              <Text style={styles.label}>Nombre Completo</Text>
-              <TextInput style={styles.input} placeholder="Nombre del trabajador" value={repName} onChangeText={setRepName} />
-              
-              <Text style={styles.label}>Correo Electrónico</Text>
-              <TextInput style={styles.input} placeholder="trabajador@gmail.com" value={repEmail} onChangeText={setRepEmail} autoCapitalize="none" keyboardType="email-address" />
-              
-              <Text style={styles.label}>Teléfono de Contacto</Text>
-              <TextInput style={styles.input} placeholder="Ej: 3101234567" value={repPhone} onChangeText={setRepPhone} keyboardType="phone-pad" />
+            <ScrollView showsVerticalScrollIndicator={false}>
+              <View style={styles.form}>
+                <Text style={styles.label}>Nombre Completo</Text>
+                <TextInput style={styles.input} placeholder="Nombre del trabajador" value={repName} onChangeText={setRepName} />
+                
+                <Text style={styles.label}>Teléfono de Contacto</Text>
+                <View style={{ flexDirection: 'row', gap: 10 }}>
+                  <TextInput 
+                    style={[styles.input, { width: 80 }]} 
+                    placeholder="+57" 
+                    value={repCountryCode} 
+                    onChangeText={setRepCountryCode} 
+                    keyboardType="phone-pad" 
+                  />
+                  <TextInput 
+                    style={[styles.input, { flex: 1 }]} 
+                    placeholder="3101234567" 
+                    value={repPhone} 
+                    onChangeText={setRepPhone} 
+                    keyboardType="phone-pad" 
+                  />
+                </View>
 
-              <TouchableOpacity style={styles.saveButton} onPress={handleStaffCreation} disabled={repSaving}>
-                {repSaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.saveButtonText}>Guardar / Invitar</Text>}
-              </TouchableOpacity>
-            </View>
+                <Text style={styles.label}>Nombre de Usuario (Login)</Text>
+                <TextInput 
+                  style={[styles.input, (editingRepId && repEmail) ? { backgroundColor: '#e2e8f0', color: '#64748b' } : {}]} 
+                  placeholder="ej: carlos123" 
+                  value={repEmail} 
+                  onChangeText={setRepEmail} 
+                  autoCapitalize="none" 
+                  editable={!editingRepId || !repEmail}
+                />
+                
+                <Text style={styles.label}>
+                  {editingRepId ? 'Nueva Contraseña (Opcional)' : 'Contraseña Temporal'}
+                </Text>
+                <View style={styles.passwordContainer}>
+                  <TextInput 
+                    style={[styles.input, { flex: 1, borderWidth: 0, marginBottom: 0 }]} 
+                    placeholder={editingRepId ? "Dejar vacío para no cambiar" : "Asigna una clave (mín. 6)"} 
+                    value={repPassword} 
+                    onChangeText={setRepPassword} 
+                    secureTextEntry={!showRepPassword} 
+                  />
+                  <TouchableOpacity onPress={() => setShowRepPassword(!showRepPassword)} style={styles.eyeBtn}>
+                    <Text style={styles.eyeText}>{showRepPassword ? '🙈' : '👁️'}</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <TouchableOpacity style={[styles.saveButton, { marginTop: 20 }]} onPress={handleStaffCreation} disabled={repSaving}>
+                  {repSaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.saveButtonText}>{editingRepId ? 'Actualizar Datos' : 'Guardar y Crear Repartidor'}</Text>}
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
     </View>
   );
@@ -1082,7 +1590,28 @@ const styles = StyleSheet.create({
   modalContent: { backgroundColor: '#fff', borderTopLeftRadius: 32, borderTopRightRadius: 32, padding: 24, minHeight: '60%' },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
   modalTitle: { fontSize: 22, fontWeight: '800', color: '#0f172a' },
-  modalSubtitle: { fontSize: 14, color: '#64748b', marginBottom: 20 },
+  modalSubtitle: { fontSize: 13, color: '#64748b', marginBottom: 20 },
+  approveClosureBtn: { backgroundColor: '#16a34a', padding: 12, borderRadius: 12, marginTop: 12, alignItems: 'center' },
+  approveClosureText: { color: '#fff', fontWeight: '800', fontSize: 12 },
+  settlementDateHeader: { fontSize: 12, fontWeight: '800', color: '#64748b', textTransform: 'uppercase', letterSpacing: 1, marginTop: 24, marginBottom: 12, paddingHorizontal: 4 },
+  settlementItem: { backgroundColor: '#fff', padding: 20, borderRadius: 24, marginBottom: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', elevation: 2, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 10, borderWidth: 1, borderColor: '#f1f5f9' },
+  settlementUser: { fontSize: 16, fontWeight: '800', color: '#0f172a' },
+  settlementOrders: { fontSize: 12, color: '#64748b', marginTop: 2 },
+  settlementBadge: { alignSelf: 'flex-start', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8, marginTop: 8 },
+  settlementBadgeText: { fontSize: 10, fontWeight: '800' },
+  settlementAmount: { fontSize: 20, fontWeight: '900', color: '#16a34a' },
+  settlementDetailHeader: { backgroundColor: '#f8fafc', padding: 20, borderRadius: 24, marginBottom: 20 },
+  settlementDetailUser: { fontSize: 18, fontWeight: '800', color: '#0f172a' },
+  settlementDetailTotal: { fontSize: 24, fontWeight: '900', color: '#16a34a', marginVertical: 4 },
+  settlementDetailDate: { fontSize: 12, color: '#64748b' },
+  settlementOrderCard: { backgroundColor: '#fff', padding: 16, borderRadius: 16, marginBottom: 12, borderWidth: 1, borderColor: '#f1f5f9' },
+  settlementOrderHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
+  settlementOrderTitle: { fontWeight: '800', color: '#0f172a' },
+  settlementOrderPrice: { fontWeight: '900', color: '#16a34a' },
+  settlementOrderInfo: { fontSize: 12, color: '#64748b' },
+  settlementReviewBox: { padding: 12, backgroundColor: '#f8fafc', borderRadius: 12, marginTop: 12, borderLeftWidth: 4, borderLeftColor: '#fbbf24' },
+  settlementReviewRating: { fontSize: 13, fontWeight: 'bold', color: '#fbbf24' },
+  settlementReviewComment: { fontSize: 13, fontStyle: 'italic', color: '#475569', marginTop: 4 },
   checkItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' },
   checkbox: { width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: '#e2e8f0', marginRight: 12, justifyContent: 'center', alignItems: 'center' },
   checkboxChecked: { backgroundColor: '#16a34a', borderColor: '#16a34a' },
@@ -1141,14 +1670,14 @@ const styles = StyleSheet.create({
   repMiniName: { fontWeight: '700', color: '#0f172a' },
   repMiniValue: { color: '#16a34a', fontWeight: '800' },
   emptyContainer: { alignItems: 'center', marginTop: 40 },
-  repCard: { backgroundColor: '#fff', padding: 20, borderRadius: 24, marginBottom: 16, elevation: 2, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 10 },
-  repInfo: { borderBottomWidth: 1, borderBottomColor: '#f1f5f9', paddingBottom: 12, marginBottom: 12 },
-  repName: { fontSize: 18, fontWeight: '800', color: '#0f172a' },
-  repEmail: { fontSize: 14, color: '#64748b', marginTop: 2 },
-  repStatsRow: { flexDirection: 'row', justifyContent: 'space-between' },
+  repCard: { backgroundColor: '#fff', padding: 18, borderRadius: 24, marginBottom: 16, elevation: 2, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 10, borderWidth: 1, borderColor: '#f1f5f9' },
+  repInfo: { borderBottomWidth: 1, borderBottomColor: '#f1f5f9', paddingBottom: 10, marginBottom: 12 },
+  repName: { fontSize: 17, fontWeight: '800', color: '#0f172a' },
+  repEmail: { fontSize: 13, color: '#64748b', marginTop: 2 },
+  repStatsRow: { flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 4 },
   repStatItem: { alignItems: 'center', flex: 1 },
-  repStatVal: { fontSize: 16, fontWeight: '900', color: '#0f172a' },
-  repStatLab: { fontSize: 10, color: '#94a3b8', textTransform: 'uppercase', marginTop: 4, fontWeight: '700' },
+  repStatVal: { fontSize: 15, fontWeight: '900', color: '#0f172a' },
+  repStatLab: { fontSize: 9, color: '#94a3b8', textTransform: 'uppercase', marginTop: 2, fontWeight: '700', textAlign: 'center' },
   orderActionsHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, flex: 1 },
   detailsBtn: { backgroundColor: '#f1f5f9', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, borderWidth: 1, borderColor: '#e2e8f0' },
   detailsBtnText: { fontSize: 11, fontWeight: '700', color: '#64748b' },
@@ -1176,4 +1705,13 @@ const styles = StyleSheet.create({
   notesBox: { backgroundColor: '#fff7ed', padding: 16, borderRadius: 16, marginTop: 15, borderWidth: 1, borderColor: '#ffedd5' },
   notesLabel: { fontSize: 11, color: '#c2410c', fontWeight: '800', textTransform: 'uppercase' },
   notesText: { fontSize: 13, color: '#9a3412', marginTop: 4 },
+  passwordContainer: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#f8fafc', borderRadius: 10, borderWidth: 1, borderColor: '#e2e8f0', marginTop: 4 },
+  eyeBtn: { padding: 12, justifyContent: 'center', alignItems: 'center' },
+  eyeText: { fontSize: 18 },
+  confirmSubtitle: { fontSize: 14, color: '#64748b', textAlign: 'center', marginBottom: 20 },
+  confirmDataBox: { backgroundColor: '#f8fafc', padding: 20, borderRadius: 20, borderWidth: 1, borderColor: '#e2e8f0' },
+  confirmLabel: { fontSize: 12, color: '#94a3b8', textTransform: 'uppercase', fontWeight: '700' },
+  confirmValue: { fontSize: 18, fontWeight: '800', color: '#0f172a', marginTop: 4 },
+  confirmAmount: { fontSize: 32, fontWeight: '900', color: '#166534', marginTop: 4 },
+  rtIndicator: { width: 8, height: 8, borderRadius: 4 },
 });

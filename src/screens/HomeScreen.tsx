@@ -60,9 +60,11 @@ interface HomeScreenProps {
   onNavigateToLanding: () => void;
   onNavigateToAdmin: () => void;
   onNavigate: (screen: string) => void;
+  unreadCount: number;
+  onResetUnread: () => void;
 }
 
-export default function HomeScreen({ onProductPress, onNavigateToCart, onNavigateToLanding, onNavigateToAdmin, onNavigate }: HomeScreenProps) {
+export default function HomeScreen({ onProductPress, onNavigateToCart, onNavigateToLanding, onNavigateToAdmin, onNavigate, unreadCount, onResetUnread }: HomeScreenProps) {
   const user = useAuthStore(state => state.user);
   const role = useAuthStore(state => state.role);
   const [activeCategory, setActiveCategory] = useState(0);
@@ -176,9 +178,19 @@ export default function HomeScreen({ onProductPress, onNavigateToCart, onNavigat
           <TouchableOpacity style={styles.iconBtn} onPress={() => onNavigateToLanding()}>
             <Text style={styles.iconEmoji}>🚪</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.iconBtn} onPress={() => onNavigate('MyOrders')}>
-            <Text style={styles.iconEmoji}>📋</Text>
-            {hasNotifications ? (
+          <TouchableOpacity 
+            style={styles.iconBtn} 
+            onPress={() => {
+              onResetUnread();
+              onNavigate('MyOrders');
+            }}
+          >
+            <Text style={styles.iconEmoji}>{unreadCount > 0 ? '🔔' : '📋'}</Text>
+            {unreadCount > 0 ? (
+              <View style={styles.badge}>
+                <Text style={styles.badgeText}>{unreadCount}</Text>
+              </View>
+            ) : hasNotifications ? (
               <View style={styles.notificationDot} />
             ) : null}
           </TouchableOpacity>

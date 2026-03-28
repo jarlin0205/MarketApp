@@ -74,7 +74,7 @@ export default function OrderStatusView({ orderId }: OrderStatusViewProps) {
         Confirmado: data.client_confirmed_at
       });
       if (data.client_confirmed_at) setCurrentStatus('Confirmado');
-      else setCurrentStatus(data.status);
+      else setCurrentStatus(data.status || 'Pendiente');
 
       if (data.repartidor_id) {
         fetchRepartidor(data.repartidor_id);
@@ -111,7 +111,13 @@ export default function OrderStatusView({ orderId }: OrderStatusViewProps) {
       </View>
 
       <View style={styles.phasesContainer}>
-        {PHASES.map((phase, index) => {
+        {currentStatus === 'Cancelado' ? (
+          <View style={styles.cancelledBox}>
+            <Text style={styles.cancelledIcon}>🚫</Text>
+            <Text style={styles.cancelledTitle}>Pedido No Disponible</Text>
+            <Text style={styles.cancelledText}>Lo sentimos, este pedido no pudo ser procesado por la tienda en este momento. Por favor, intenta más tarde o contacta con soporte si tienes dudas.</Text>
+          </View>
+        ) : PHASES.map((phase, index) => {
           const isCompleted = index < currentIdx;
           const isCurrent = index === currentIdx;
           
@@ -225,5 +231,9 @@ const styles = StyleSheet.create({
   messengerName: { color: '#fff', fontSize: 18, fontWeight: '800' },
   messengerAction: { color: '#16a34a', fontSize: 13, fontWeight: '700', marginTop: 2 },
   callBtn: { backgroundColor: '#16a34a', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 12 },
-  callBtnText: { color: '#fff', fontWeight: '800', fontSize: 13 }
+  callBtnText: { color: '#fff', fontWeight: '800', fontSize: 13 },
+  cancelledBox: { padding: 20, backgroundColor: '#fff1f2', borderRadius: 20, alignItems: 'center', borderStyle: 'dashed', borderWidth: 2, borderColor: '#fecdd3' },
+  cancelledIcon: { fontSize: 40, marginBottom: 10 },
+  cancelledTitle: { fontSize: 18, fontWeight: '800', color: '#e11d48', marginBottom: 8 },
+  cancelledText: { fontSize: 13, color: '#9f1239', textAlign: 'center', lineHeight: 20, fontWeight: '500' }
 });

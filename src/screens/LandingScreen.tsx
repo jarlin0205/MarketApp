@@ -18,6 +18,17 @@ import {
 import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/useAuthStore';
 
+const KeyboardDismissView = ({ children }: { children: React.ReactNode }) => {
+  if (Platform.OS === 'web') {
+    return <>{children}</>;
+  }
+  return (
+    <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+      {children}
+    </TouchableWithoutFeedback>
+  );
+};
+
 export default function LandingScreen({ onNavigate }: { onNavigate: (screen: string) => void }) {
   const [loginVisible, setLoginVisible] = useState(false);
   const [signupVisible, setSignupVisible] = useState(false);
@@ -26,6 +37,7 @@ export default function LandingScreen({ onNavigate }: { onNavigate: (screen: str
   
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [fullName, setFullName] = useState('');
   const [loading, setLoading] = useState(false);
   
@@ -33,63 +45,90 @@ export default function LandingScreen({ onNavigate }: { onNavigate: (screen: str
 
   const validateEmail = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 
-  const handleLogin = async () => {
-    if (!validateEmail(email)) return Alert.alert("Error", "Email inválido");
+  const handleLogin = async (expectedRole: 'client' | 'admin' | 'repartidor' = 'client') => {
+    let loginEmail = email.trim().toLowerCase();
+    
+    // Phase 41: Login especial para Repartidores (Local, sin Supabase Auth)
+    if (expectedRole === 'repartidor') {
+      if (!loginEmail || password.length < 6) return Alert.alert("Error", "Usuario o clave inválida");
+      
+      setLoading(true);
+      try {
+        const { data: rpcData, error: rpcError } = await supabase.rpc('verify_messenger_login', {
+          p_username: loginEmail,
+          p_password: password
+        });
+
+        if (rpcError || rpcData?.error) {
+          throw new Error(rpcData?.error || "Error al verificar repartidor");
+        }
+
+        // Simulación de sesión local
+        setUser(rpcData.user, 'repartidor', password);
+        setLoading(false);
+        setLoginVisible(false);
+        setAdminVisible(false);
+        onNavigate('DeliveryDashboard');
+        return;
+      } catch (err: any) {
+        setLoading(false);
+        Alert.alert("Error de Acceso 🛵", err.message);
+        return;
+      }
+    }
+
+    // Login Nativo para Clientes/Admin
+    if (!validateEmail(loginEmail)) return Alert.alert("Error", "Email inválido");
     if (password.length < 6) return Alert.alert("Error", "Cédula/Contraseña muy corta");
 
     setLoading(true);
     try {
-      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+      const { data, error } = await supabase.auth.signInWithPassword({ email: loginEmail, password });
 
       if (error) {
         setLoading(false);
         Alert.alert("Error de Acceso", error.message);
       } else {
-        // Obtener rol del perfil
         const { data: profile } = await supabase
           .from('profiles')
-          .select('role')
+          .select('*')
           .eq('id', data.user.id)
           .single();
+
+        let userRole = profile?.role || 'client';
         
-        const userRole = profile?.role || 'client';
+        // Phase 26: Auto-promoción por staff_pre_auth
+        const { data: preAuth } = await supabase
+          .from('staff_pre_auth')
+          .select('role')
+          .eq('email', loginEmail)
+          .single();
         
-        // Phase 26: Verificar Lista Blanca si es nuevo o el rol es 'client'
-        if (userRole === 'client') {
-          const { data: preAuth } = await supabase
-            .from('staff_pre_auth')
-            .select('role, phone')
-            .eq('email', email)
-            .single();
-          
-          if (preAuth) {
-            await supabase.from('profiles').update({ 
-              role: preAuth.role,
-              phone: preAuth.phone || null
-            }).eq('id', data.user.id);
-            await supabase.from('staff_pre_auth').delete().eq('email', email);
-            setUser(data.user, preAuth.role);
-            setLoading(false);
-            setLoginVisible(false);
-            if (preAuth.role === 'admin') onNavigate('AdminDashboard');
-            else onNavigate('DeliveryDashboard');
-            return;
-          }
+        if (preAuth) {
+          userRole = preAuth.role;
+          await supabase.from('profiles').update({ role: userRole }).eq('id', data.user.id);
+          await supabase.from('staff_pre_auth').delete().eq('email', loginEmail);
+        }
+
+        // Validación Estricta de Rol
+        if (expectedRole !== 'client' && userRole !== expectedRole) {
+          await supabase.auth.signOut();
+          setLoading(false);
+          Alert.alert("Acceso Denegado 🛑", `No tienes credenciales como ${expectedRole}.`);
+          return;
         }
 
         setUser(data.user, userRole);
-        
         setLoading(false);
         setLoginVisible(false);
+        setAdminVisible(false);
         
-        // Redirigir según rol
         if (userRole === 'admin') onNavigate('AdminDashboard');
-        else if (userRole === 'repartidor') onNavigate('DeliveryDashboard');
         else onNavigate('Home');
       }
     } catch (err: any) {
       setLoading(false);
-      Alert.alert("Error de Red", "No se pudo conectar al servidor. Verifica tu conexión a internet y las credenciales de Supabase en src/lib/supabase.ts");
+      Alert.alert("Error de Red", "No se pudo conectar al servidor.");
     }
   };
 
@@ -141,7 +180,7 @@ export default function LandingScreen({ onNavigate }: { onNavigate: (screen: str
     // Phase 30: Acceso validado al 100% por base de datos (Supabase Auth y tabla Profiles)
     // Se elimina el acceso manual inseguro. Todos los administradores y repartidores deben estar 
     // registrados formalmente en la plataforma tras haber sido pre-autorizados en la Lista Blanca.
-    handleLogin();
+    handleLogin(staffRole);
   };
 
   return (
@@ -169,7 +208,7 @@ export default function LandingScreen({ onNavigate }: { onNavigate: (screen: str
 
             <View style={styles.footer}>
               <TouchableOpacity style={styles.primaryButton} onPress={() => setLoginVisible(true)}>
-                <Text style={styles.primaryButtonText}>Iniciar Sesión</Text>
+                <Text style={styles.primaryButtonText}>Iniciar Sesión como Consumidor</Text>
               </TouchableOpacity>
               
               <TouchableOpacity style={styles.secondaryButton} onPress={() => setSignupVisible(true)}>
@@ -194,7 +233,7 @@ export default function LandingScreen({ onNavigate }: { onNavigate: (screen: str
 
       {/* LOGIN MODAL */}
       <Modal visible={loginVisible} animationType="slide" transparent>
-        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+        <KeyboardDismissView>
           <View style={styles.modalOverlay}>
             <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalContent}>
               <View style={styles.modalHeader}>
@@ -216,26 +255,31 @@ export default function LandingScreen({ onNavigate }: { onNavigate: (screen: str
                 />
                 
                 <Text style={styles.label}>Contraseña</Text>
-                <TextInput 
-                  style={styles.input} 
-                  placeholder="********" 
-                  placeholderTextColor="#94a3b8"
-                  value={password}
-                  onChangeText={setPassword}
-                  secureTextEntry
-                />
+                <View style={styles.passwordContainer}>
+                  <TextInput 
+                    style={[styles.input, { flex: 1, borderWidth: 0, paddingVertical: 12 }]} 
+                    placeholder="********" 
+                    placeholderTextColor="#94a3b8"
+                    value={password}
+                    onChangeText={setPassword}
+                    secureTextEntry={!showPassword}
+                  />
+                  <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={styles.eyeBtn}>
+                    <Text style={styles.eyeText}>{showPassword ? '🙈' : '👁️'}</Text>
+                  </TouchableOpacity>
+                </View>
 
-                <TouchableOpacity style={styles.submitBtn} onPress={handleLogin} disabled={loading}>
+                <TouchableOpacity style={styles.submitBtn} onPress={() => handleLogin('client')} disabled={loading}>
                   {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.submitBtnText}>Entrar</Text>}
                 </TouchableOpacity>
               </View>
             </KeyboardAvoidingView>
           </View>
-        </TouchableWithoutFeedback>
+        </KeyboardDismissView>
       </Modal>
 
       <Modal visible={adminVisible} animationType="fade" transparent>
-        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+        <KeyboardDismissView>
           <View style={styles.modalOverlay}>
             <View style={[styles.modalContent, { height: '50%', borderTopLeftRadius: 0, borderTopRightRadius: 0, borderRadius: 24, margin: 20 }]}>
               <View style={styles.modalHeader}>
@@ -248,32 +292,48 @@ export default function LandingScreen({ onNavigate }: { onNavigate: (screen: str
               </View>
               
               <View style={styles.form}>
-                <TextInput 
-                  style={styles.input} 
-                  placeholder="Admin Email" 
-                  value={email}
-                  onChangeText={setEmail}
-                  autoCapitalize="none"
-                />
-                <TextInput 
-                  style={[styles.input, { marginTop: 12 }]} 
-                  placeholder="Admin Password" 
-                  value={password}
-                  onChangeText={setPassword}
-                  secureTextEntry
-                />
+                {staffRole === 'repartidor' ? (
+                  <TextInput 
+                    style={styles.input} 
+                    placeholder="Nombre de Usuario (ej: carlos123)" 
+                    value={email}
+                    onChangeText={setEmail}
+                    autoCapitalize="none"
+                  />
+                ) : (
+                  <TextInput 
+                    style={styles.input} 
+                    placeholder="Admin Email" 
+                    value={email}
+                    onChangeText={setEmail}
+                    autoCapitalize="none"
+                    keyboardType="email-address"
+                  />
+                )}
+                <View style={[styles.passwordContainer, { marginTop: 12 }]}>
+                  <TextInput 
+                    style={[styles.input, { flex: 1, borderWidth: 0, paddingVertical: 12 }]} 
+                    placeholder="Admin Password" 
+                    value={password}
+                    onChangeText={setPassword}
+                    secureTextEntry={!showPassword}
+                  />
+                  <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={styles.eyeBtn}>
+                    <Text style={styles.eyeText}>{showPassword ? '🙈' : '👁️'}</Text>
+                  </TouchableOpacity>
+                </View>
                 <TouchableOpacity style={[styles.submitBtn, { backgroundColor: '#0f172a' }]} onPress={handleStaffLogin} disabled={loading}>
                   {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.submitBtnText}>Entrar como {staffRole === 'admin' ? 'Administrador' : 'Repartidor'}</Text>}
                 </TouchableOpacity>
               </View>
             </View>
           </View>
-        </TouchableWithoutFeedback>
+        </KeyboardDismissView>
       </Modal>
 
       {/* SIGNUP MODAL */}
       <Modal visible={signupVisible} animationType="slide" transparent>
-        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+        <KeyboardDismissView>
           <View style={styles.modalOverlay}>
             <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalContent}>
               <View style={styles.modalHeader}>
@@ -291,7 +351,18 @@ export default function LandingScreen({ onNavigate }: { onNavigate: (screen: str
                 <TextInput style={styles.input} placeholder="ejemplo@correo.com" value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" />
                 
                 <Text style={styles.label}>Contraseña</Text>
-                <TextInput style={styles.input} placeholder="Mínimo 6 caracteres" value={password} onChangeText={setPassword} secureTextEntry />
+                <View style={styles.passwordContainer}>
+                  <TextInput 
+                    style={[styles.input, { flex: 1, borderWidth: 0, paddingVertical: 12 }]} 
+                    placeholder="Mínimo 6 caracteres" 
+                    value={password} 
+                    onChangeText={setPassword} 
+                    secureTextEntry={!showPassword} 
+                  />
+                  <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={styles.eyeBtn}>
+                    <Text style={styles.eyeText}>{showPassword ? '🙈' : '👁️'}</Text>
+                  </TouchableOpacity>
+                </View>
 
                 <TouchableOpacity style={styles.submitBtn} onPress={handleSignup} disabled={loading}>
                   {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.submitBtnText}>Registrarse</Text>}
@@ -299,7 +370,7 @@ export default function LandingScreen({ onNavigate }: { onNavigate: (screen: str
               </View>
             </KeyboardAvoidingView>
           </View>
-        </TouchableWithoutFeedback>
+        </KeyboardDismissView>
       </Modal>
     </View>
   );
@@ -357,5 +428,21 @@ const styles = StyleSheet.create({
     backgroundColor: '#16a34a', paddingVertical: 18, borderRadius: 16, alignItems: 'center', marginTop: 32,
     shadowColor: '#16a34a', shadowOpacity: 0.2, shadowRadius: 8
   },
-  submitBtnText: { color: '#ffffff', fontSize: 16, fontWeight: '700' }
+  submitBtnText: { color: '#ffffff', fontSize: 16, fontWeight: '700' },
+  passwordContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0'
+  },
+  eyeBtn: {
+    padding: 12,
+    justifyContent: 'center',
+    alignItems: 'center'
+  },
+  eyeText: {
+    fontSize: 18
+  }
 });

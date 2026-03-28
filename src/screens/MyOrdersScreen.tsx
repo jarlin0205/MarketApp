@@ -19,9 +19,10 @@ import OrderStatusView from '../components/OrderStatusView';
 
 interface MyOrdersScreenProps {
   onBack: () => void;
+  onEnterScreen?: () => void;
 }
 
-export default function MyOrdersScreen({ onBack }: MyOrdersScreenProps) {
+export default function MyOrdersScreen({ onBack, onEnterScreen }: MyOrdersScreenProps) {
   const user = useAuthStore(state => state.user);
   const [orders, setOrders] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -49,22 +50,29 @@ export default function MyOrdersScreen({ onBack }: MyOrdersScreenProps) {
       const { data, error } = await supabase
         .from('orders')
         .select('*, order_reviews(id)')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false });
+        .eq('user_id', user.id);
       
       if (error) throw error;
-      setOrders(data || []);
+      
+      // ORDENAMIENTO INTELIGENTE v6.4.1 🚚📈
+      // Jerarquía: 
+      // 1. Entregado (Pendiente de firma del cliente)
+      // 2. Enviado (En ruta)
+      // 3. Otros por fecha desc
+      const sortedOrders = (data || []).sort((a: any, b: any) => {
+        const isEntregadoA = a.status === 'Entregado' && !a.client_confirmed_at;
+        const isEntregadoB = b.status === 'Entregado' && !b.client_confirmed_at;
+        
+        if (isEntregadoA && !isEntregadoB) return -1;
+        if (!isEntregadoA && isEntregadoB) return 1;
+        
+        if (a.status === 'Enviado' && b.status !== 'Enviado') return -1;
+        if (a.status !== 'Enviado' && b.status === 'Enviado') return 1;
+        
+        return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+      });
 
-      // Auto-disparar evaluación si el repartidor marcó ENTREGADO pero el cliente no ha CONFIRMADO
-      const needsReview = (data || []).find(o => 
-        o.status === 'Entregado' && 
-        !o.client_confirmed_at &&
-        o.id !== dismissedReviewId 
-      );
-      if (needsReview) {
-        setReviewOrder(needsReview);
-        setIsReviewModalVisible(true);
-      }
+      setOrders(sortedOrders);
     } catch (error) {
       console.error('Error fetching my orders:', error);
     } finally {
@@ -92,6 +100,48 @@ export default function MyOrdersScreen({ onBack }: MyOrdersScreenProps) {
 
   useEffect(() => {
     fetchOrders();
+    if (onEnterScreen) onEnterScreen();
+
+    if (!user) return;
+
+    // Suscripción en tiempo real de Alta Velocidad (v4 - Filtro Cliente) 🚀
+    const channel = supabase
+      .channel(`client-live-updates-${user.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'orders'
+          // Filtro removido de aquí para evitar pérdida de señal por Replica Identity
+        },
+        (payload) => {
+          const updatedOrder = payload.new as any;
+          
+          // FILTRO MANUAL: Solo procesar si el pedido pertenece a este usuario
+          if (updatedOrder && updatedOrder.user_id !== user.id) return;
+
+          console.log('📱 Cambio en pedido detectado para cliente:', payload.eventType, 'Status:', updatedOrder?.status);
+          
+          if (payload.eventType === 'INSERT') {
+             setOrders(current => [payload.new, ...current]);
+          } else if (payload.eventType === 'UPDATE') {
+             setOrders(current =>
+               current.map(o => o.id === updatedOrder.id ? { ...o, ...updatedOrder } : o)
+             );
+
+             // Notificación centralizada en App.tsx. ✨
+             if (updatedOrder.status === 'Cancelado') {
+                console.log('🚫 Info: Pedido Cancelado detectado (Alerta manejada por App.tsx)');
+             }
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      channel.unsubscribe();
+    };
   }, [user]);
 
   const onRefresh = () => {
@@ -235,10 +285,11 @@ export default function MyOrdersScreen({ onBack }: MyOrdersScreenProps) {
         });
       if (revError) throw revError;
 
-      // 2. IMPORTANTE: Guardar confirmación del cliente
+      // 2. IMPORTANTE: Guardar confirmación del cliente y pasar a estado terminal "Confirmado"
       const { error: ordError } = await supabase
         .from('orders')
         .update({ 
+          status: 'Confirmado',
           client_confirmed_at: new Date().toISOString(),
           client_viewed_status: true 
         })
@@ -362,6 +413,9 @@ export default function MyOrdersScreen({ onBack }: MyOrdersScreenProps) {
               <View style={styles.orderMain}>
                  <View>
                     <Text style={styles.orderId}>#ORD-{order.id.substring(0, 6).toUpperCase()}</Text>
+                    {order.customer_name ? (
+                       <Text style={styles.customerName}>👤 {order.customer_name}</Text>
+                    ) : null}
                     <Text style={styles.orderDate}>{new Date(order.created_at).toLocaleDateString()} • {new Date(order.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>
                  </View>
                  <View style={{ alignItems: 'flex-end' }}>
@@ -387,6 +441,15 @@ export default function MyOrdersScreen({ onBack }: MyOrdersScreenProps) {
                     <Text style={styles.statusBtnText}>Estado de Pedido</Text>
                  </TouchableOpacity>
               </View>
+
+              {order.status === 'Entregado' && !order.client_confirmed_at && (
+                <TouchableOpacity 
+                   style={styles.manualReviewBtn} 
+                   onPress={() => { setReviewOrder(order); setIsReviewModalVisible(true); }}
+                >
+                   <Text style={styles.manualReviewBtnText}>⭐ Calificar mi Pedido</Text>
+                </TouchableOpacity>
+              )}
             </View>
           ))
         )}
@@ -418,6 +481,7 @@ const styles = StyleSheet.create({
   orderMain: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
   orderId: { fontSize: 16, fontWeight: '800', color: '#0f172a' },
   orderDate: { fontSize: 13, color: '#64748b', marginTop: 4 },
+  customerName: { fontSize: 14, fontWeight: '700', color: '#16a34a', marginTop: 2, marginBottom: 2 },
   statusBadge: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12, fontSize: 12, fontWeight: '700', overflow: 'hidden' },
   statusPending: { backgroundColor: '#e2e8f0', color: '#64748b' },
   statusReceived: { backgroundColor: '#dcfce7', color: '#16a34a' },
@@ -476,5 +540,7 @@ const styles = StyleSheet.create({
   modalTotalLabel: { fontSize: 16, fontWeight: '600', color: '#64748b' },
   modalTotalValue: { fontSize: 24, fontWeight: '900', color: '#16a34a' },
   closeModalBtn: { backgroundColor: '#0f172a', paddingVertical: 16, borderRadius: 16, alignItems: 'center', marginTop: 30 },
-  closeModalBtnText: { color: '#ffffff', fontWeight: '800', fontSize: 16 }
+  closeModalBtnText: { color: '#ffffff', fontWeight: '800', fontSize: 16 },
+  manualReviewBtn: { backgroundColor: '#16a34a', paddingVertical: 12, borderRadius: 12, marginTop: 12, alignItems: 'center' },
+  manualReviewBtnText: { color: '#fff', fontWeight: '800', fontSize: 13 }
 });

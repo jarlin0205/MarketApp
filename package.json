@@ -11,6 +11,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.100.0",
     "expo": "~54.0.33",
+    "expo-av": "~16.0.8",
     "expo-crypto": "~15.0.8",
     "expo-image-picker": "~17.0.10",
     "expo-secure-store": "~15.0.8",

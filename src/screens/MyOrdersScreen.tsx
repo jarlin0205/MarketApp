@@ -39,6 +39,12 @@ export default function MyOrdersScreen({ onBack, onEnterScreen }: MyOrdersScreen
   const [comment, setComment] = useState('');
   const [reviewOrder, setReviewOrder] = useState<any>(null);
   const [savingReview, setSavingReview] = useState(false);
+  
+  // Estados para Rechazo v6.6 📦❌
+  const [showRejectionInput, setShowRejectionInput] = useState(false);
+  const [rejectionReason, setRejectionReason] = useState('');
+  const [isRejecting, setIsRejecting] = useState(false);
+
   const [activeModal, setActiveModal] = useState<'details' | 'status' | null>(null);
   const [dismissedReviewId, setDismissedReviewId] = useState<string | null>(null);
 
@@ -46,7 +52,6 @@ export default function MyOrdersScreen({ onBack, onEnterScreen }: MyOrdersScreen
     if (!user) return;
     try {
       setLoading(true);
-      // Incluimos check de reviews para no repetir el modal
       const { data, error } = await supabase
         .from('orders')
         .select('*, order_reviews(id)')
@@ -54,11 +59,6 @@ export default function MyOrdersScreen({ onBack, onEnterScreen }: MyOrdersScreen
       
       if (error) throw error;
       
-      // ORDENAMIENTO INTELIGENTE v6.4.1 🚚📈
-      // Jerarquía: 
-      // 1. Entregado (Pendiente de firma del cliente)
-      // 2. Enviado (En ruta)
-      // 3. Otros por fecha desc
       const sortedOrders = (data || []).sort((a: any, b: any) => {
         const isEntregadoA = a.status === 'Entregado' && !a.client_confirmed_at;
         const isEntregadoB = b.status === 'Entregado' && !b.client_confirmed_at;
@@ -104,7 +104,6 @@ export default function MyOrdersScreen({ onBack, onEnterScreen }: MyOrdersScreen
 
     if (!user) return;
 
-    // Suscripción en tiempo real de Alta Velocidad (v4 - Filtro Cliente) 🚀
     const channel = supabase
       .channel(`client-live-updates-${user.id}`)
       .on(
@@ -113,15 +112,10 @@ export default function MyOrdersScreen({ onBack, onEnterScreen }: MyOrdersScreen
           event: '*',
           schema: 'public',
           table: 'orders'
-          // Filtro removido de aquí para evitar pérdida de señal por Replica Identity
         },
         (payload) => {
           const updatedOrder = payload.new as any;
-          
-          // FILTRO MANUAL: Solo procesar si el pedido pertenece a este usuario
           if (updatedOrder && updatedOrder.user_id !== user.id) return;
-
-          console.log('📱 Cambio en pedido detectado para cliente:', payload.eventType, 'Status:', updatedOrder?.status);
           
           if (payload.eventType === 'INSERT') {
              setOrders(current => [payload.new, ...current]);
@@ -129,11 +123,6 @@ export default function MyOrdersScreen({ onBack, onEnterScreen }: MyOrdersScreen
              setOrders(current =>
                current.map(o => o.id === updatedOrder.id ? { ...o, ...updatedOrder } : o)
              );
-
-             // Notificación centralizada en App.tsx. ✨
-             if (updatedOrder.status === 'Cancelado') {
-                console.log('🚫 Info: Pedido Cancelado detectado (Alerta manejada por App.tsx)');
-             }
           }
         }
       )
@@ -156,7 +145,6 @@ export default function MyOrdersScreen({ onBack, onEnterScreen }: MyOrdersScreen
         .update({ client_viewed_status: true })
         .eq('id', orderId);
       
-      // Actualizar estado local para quitar el badge inmediatamente
       setOrders(current => current.map(o => o.id === orderId ? { ...o, client_viewed_status: true } : o));
     } catch (err) {
       console.error("Error marking as seen:", err);
@@ -185,8 +173,10 @@ export default function MyOrdersScreen({ onBack, onEnterScreen }: MyOrdersScreen
       case 'Pendiente': return styles.statusPending;
       case 'Recibida': return styles.statusReceived;
       case 'Preparación': return styles.statusPreparing;
-      case 'Enviado': return styles.statusShipped;
-      case 'Entregado': return selectedOrder?.client_confirmed_at ? styles.statusConfirmed : styles.statusDone;
+      case 'Enviado': return styles.statusEnviado;
+      case 'Entregado': return styles.statusEntregado;
+      case 'No Recibido': return styles.statusNoRecibido;
+      case 'Confirmado': return styles.statusConfirmado;
       default: return styles.statusPending;
     }
   };
@@ -273,8 +263,6 @@ export default function MyOrdersScreen({ onBack, onEnterScreen }: MyOrdersScreen
     if (!user || !reviewOrder) return;
     try {
       setSavingReview(true);
-      
-      // 1. Guardar la reseña
       const { error: revError } = await supabase
         .from('order_reviews')
         .insert({
@@ -285,7 +273,6 @@ export default function MyOrdersScreen({ onBack, onEnterScreen }: MyOrdersScreen
         });
       if (revError) throw revError;
 
-      // 2. IMPORTANTE: Guardar confirmación del cliente y pasar a estado terminal "Confirmado"
       const { error: ordError } = await supabase
         .from('orders')
         .update({ 
@@ -296,8 +283,8 @@ export default function MyOrdersScreen({ onBack, onEnterScreen }: MyOrdersScreen
         .eq('id', reviewOrder.id);
       if (ordError) throw ordError;
       
-      Alert.alert("¡Pedido Confirmado!", "Gracias por confirmar la recepción. Tu opinión nos ayuda a mejorar.");
-      setIsReviewModalVisible(false);
+      Alert.alert("¡Pedido Confirmado!", "Gracias por confirmar la recepción.");
+      setReviewOrder(null);
       fetchOrders();
     } catch (err: any) {
       Alert.alert("Error", err.message);
@@ -306,54 +293,114 @@ export default function MyOrdersScreen({ onBack, onEnterScreen }: MyOrdersScreen
     }
   };
 
+  const handleRejectOrder = async () => {
+    if (!reviewOrder || !rejectionReason.trim()) {
+      const msg = "Por favor, indica el motivo del rechazo.";
+      return Platform.OS === 'web' ? window.alert(msg) : Alert.alert("Error", msg);
+    }
+
+    try {
+      setIsRejecting(true);
+      console.log('📦 Iniciando reporte de rechazo para orden:', reviewOrder.id);
+
+      const { error } = await supabase
+        .from('orders')
+        .update({ 
+          status: 'No Recibido',
+          client_rejection_reason: rejectionReason,
+          client_rejected_at: new Date().toISOString(),
+          client_viewed_status: true 
+        })
+        .eq('id', reviewOrder.id);
+      
+      if (error) throw error;
+      
+      const successMsg = "El administrador revisará tu caso pronto.";
+      if (Platform.OS === 'web') window.alert("Rechazo Registrado: " + successMsg);
+      else Alert.alert("Rechazo Registrado", successMsg);
+
+      setReviewOrder(null);
+      setShowRejectionInput(false);
+      setRejectionReason('');
+      fetchOrders();
+    } catch (e: any) {
+      console.error('❌ Error en handleRejectOrder:', e);
+      const errMsg = e.message || "No se pudo enviar el reporte.";
+      if (Platform.OS === 'web') window.alert("Error: " + errMsg);
+      else Alert.alert("Error", errMsg);
+    } finally {
+      setIsRejecting(false);
+    }
+  };
+
   const renderReviewModal = () => (
-    <Modal visible={isReviewModalVisible} animationType="slide" transparent>
+    <Modal visible={!!reviewOrder} animationType="slide" transparent>
       <View style={styles.modalOverlay}>
-         <View style={[styles.reviewModalContent]}>
-            <View style={styles.reviewModalHeader}>
-               <View style={{ width: 24 }} /> 
-               <Text style={styles.reviewModalTitle}>📦 ¿Recibiste tu pedido?</Text>
-               <TouchableOpacity onPress={() => { setDismissedReviewId(reviewOrder?.id); setIsReviewModalVisible(false); }}>
-                  <Text style={{ fontSize: 24, color: '#94a3b8', fontWeight: 'bold' }}>✕</Text>
-               </TouchableOpacity>
-            </View>
-            <Text style={styles.reviewModalSubtitle}>Confirma que ya tienes tus productos y califica nuestro servicio:</Text>
-            
-            <View style={styles.starsRow}>
-               {[1, 2, 3, 4, 5].map((s) => (
+        <View style={styles.modalContent}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Confirmar Entrega 📦</Text>
+            <TouchableOpacity onPress={() => { setReviewOrder(null); setShowRejectionInput(false); }}><Text style={{ fontSize: 24 }}>✕</Text></TouchableOpacity>
+          </View>
+
+          {!showRejectionInput ? (
+            <ScrollView showsVerticalScrollIndicator={false}>
+              <Text style={styles.modalSubtitle}>¿Cómo estuvo tu experiencia con este pedido?</Text>
+              
+              <View style={styles.starsContainer}>
+                {[1, 2, 3, 4, 5].map(s => (
                   <TouchableOpacity key={s} onPress={() => setRating(s)}>
-                     <Text style={[styles.starIcon, rating >= s ? styles.starActive : styles.starInactive]}>
-                        ⭐
-                     </Text>
+                    <Text style={[styles.star, rating >= s ? styles.starFilled : styles.starEmpty]}>⭐</Text>
                   </TouchableOpacity>
-               ))}
-            </View>
+                ))}
+              </View>
 
-            <TextInput
-               style={styles.commentInput}
-               placeholder="Cuéntanos más... (opcional)"
-               multiline
-               numberOfLines={4}
-               value={comment}
-               onChangeText={setComment}
-            />
+              <Text style={styles.label}>Comentario (Opcional)</Text>
+              <TextInput 
+                style={styles.reviewInput} 
+                placeholder="Cuéntanos qué te pareció el servicio..."
+                value={comment}
+                onChangeText={setComment}
+                multiline
+              />
 
-            <TouchableOpacity 
-               style={[styles.submitReviewBtn, savingReview && styles.btnDisabled]} 
-               onPress={saveReview}
-               disabled={savingReview}
-            >
-               {savingReview ? (
-                 <ActivityIndicator color="#fff" />
-               ) : (
-                 <Text style={styles.submitReviewText}>Confirmar Recibido y Evaluar</Text>
-               )}
-            </TouchableOpacity>
+              <TouchableOpacity style={styles.saveReviewBtn} onPress={saveReview} disabled={savingReview}>
+                 {savingReview ? <ActivityIndicator color="#fff" /> : <Text style={styles.saveReviewBtnText}>Confirmar y Finalizar ✅</Text>}
+              </TouchableOpacity>
 
-            <TouchableOpacity style={styles.skipBtn} onPress={() => setIsReviewModalVisible(false)}>
-               <Text style={styles.skipBtnText}>Ahora no</Text>
-            </TouchableOpacity>
-         </View>
+              <TouchableOpacity 
+                style={[styles.saveReviewBtn, { backgroundColor: '#fecaca', marginTop: 10, borderWidth: 0 }]} 
+                onPress={() => setShowRejectionInput(true)}
+              >
+                 <Text style={[styles.saveReviewBtnText, { color: '#ef4444' }]}>No recibí mi pedido ❌</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          ) : (
+            <ScrollView showsVerticalScrollIndicator={false}>
+              <Text style={[styles.modalSubtitle, { color: '#ef4444', fontWeight: 'bold', marginBottom: 10 }]}>¿Por qué no recibiste el pedido?</Text>
+              <TextInput 
+                style={[styles.reviewInput, { borderColor: '#ef4444' }]} 
+                placeholder="Ej: Llegó incompleto, en mal estado, nunca llegó..."
+                value={rejectionReason}
+                onChangeText={setRejectionReason}
+                multiline
+                numberOfLines={4}
+              />
+              <TouchableOpacity 
+                style={[styles.saveReviewBtn, { backgroundColor: '#ef4444' }]} 
+                onPress={handleRejectOrder} 
+                disabled={isRejecting}
+              >
+                 {isRejecting ? <ActivityIndicator color="#fff" /> : <Text style={styles.saveReviewBtnText}>Enviar Reporte de Rechazo ✕</Text>}
+              </TouchableOpacity>
+              <TouchableOpacity 
+                style={{ alignSelf: 'center', marginTop: 15, paddingBottom: 20 }} 
+                onPress={() => setShowRejectionInput(false)}
+              >
+                 <Text style={{ color: '#64748b', fontWeight: 'bold' }}>Volver</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          )}
+        </View>
       </View>
     </Modal>
   );
@@ -445,7 +492,7 @@ export default function MyOrdersScreen({ onBack, onEnterScreen }: MyOrdersScreen
               {order.status === 'Entregado' && !order.client_confirmed_at && (
                 <TouchableOpacity 
                    style={styles.manualReviewBtn} 
-                   onPress={() => { setReviewOrder(order); setIsReviewModalVisible(true); }}
+                   onPress={() => setReviewOrder(order)}
                 >
                    <Text style={styles.manualReviewBtnText}>⭐ Calificar mi Pedido</Text>
                 </TouchableOpacity>
@@ -483,16 +530,18 @@ const styles = StyleSheet.create({
   orderDate: { fontSize: 13, color: '#64748b', marginTop: 4 },
   customerName: { fontSize: 14, fontWeight: '700', color: '#16a34a', marginTop: 2, marginBottom: 2 },
   statusBadge: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12, fontSize: 12, fontWeight: '700', overflow: 'hidden' },
-  statusPending: { backgroundColor: '#e2e8f0', color: '#64748b' },
-  statusReceived: { backgroundColor: '#dcfce7', color: '#16a34a' },
-  statusPreparing: { backgroundColor: '#fef3c7', color: '#d97706' },
-  statusShipped: { backgroundColor: '#e0e7ff', color: '#4338ca' },
-  statusDone: { backgroundColor: '#fef2f2', color: '#dc2626' }, // Entregado por repartidor (esperando cliente)
-  statusConfirmed: { backgroundColor: '#dcfce7', color: '#16a34a' }, // Final
+  
+  // Estados de Pedido
+  statusPending: { backgroundColor: '#e2e8f0', borderColor: '#64748b' },
+  statusReceived: { backgroundColor: '#dcfce7', borderColor: '#16a34a' },
+  statusPreparing: { backgroundColor: '#fef3c7', borderColor: '#d97706' },
+  statusEnviado: { backgroundColor: '#e0e7ff', borderColor: '#4338ca' },
+  statusEntregado: { backgroundColor: '#fef3c7', borderColor: '#d97706' },
+  statusNoRecibido: { backgroundColor: '#fee2e2', borderColor: '#ef4444' },
+  statusConfirmado: { backgroundColor: '#dcfce7', borderColor: '#16a34a' },
+  statusText: { fontSize: 10, fontWeight: '800', color: '#0f172a' },
   confirmedDate: { fontSize: 10, color: '#94a3b8', marginTop: 4 },
-  partialBg: { backgroundColor: '#fff7ed' },
-  partialText: { color: '#c2410c' },
-  originalQty: { fontSize: 11, color: '#94a3b8', marginBottom: 2 },
+
   orderFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 16 },
   totalLabel: { fontSize: 14, color: '#64748b' },
   totalValue: { fontSize: 18, fontWeight: '800', color: '#0f172a' },
@@ -501,46 +550,54 @@ const styles = StyleSheet.create({
   detailBtnText: { color: '#64748b', fontWeight: '700', fontSize: 13 },
   statusBtn: { flex: 1, paddingVertical: 12, borderRadius: 12, backgroundColor: '#0f172a', alignItems: 'center' },
   statusBtnText: { color: '#ffffff', fontWeight: '700', fontSize: 13 },
+  
+  // Modales General
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
-  modalContent: { backgroundColor: '#ffffff', borderTopLeftRadius: 32, borderTopRightRadius: 32, padding: 24, height: '80%' },
+  modalContent: { backgroundColor: '#ffffff', borderTopLeftRadius: 32, borderTopRightRadius: 32, padding: 24, maxHeight: '90%' },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
   modalTitle: { fontSize: 20, fontWeight: '800', color: '#0f172a' },
-  reviewModalContent: { backgroundColor: '#ffffff', borderRadius: 32, padding: 30, width: '90%', alignItems: 'center', alignSelf: 'center', marginBottom: '20%' },
-  reviewModalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', width: '100%', marginBottom: 15 },
-  reviewModalTitle: { fontSize: 20, fontWeight: '900', color: '#0f172a', textAlign: 'center', flex: 1 },
-  reviewModalSubtitle: { fontSize: 14, color: '#64748b', textAlign: 'center', marginBottom: 25 },
-  starsRow: { flexDirection: 'row', gap: 10, marginBottom: 25 },
-  starIcon: { fontSize: 40 },
-  starActive: { opacity: 1 },
-  starInactive: { opacity: 0.3 },
-  commentInput: { width: '100%', backgroundColor: '#f8fafc', borderRadius: 16, padding: 15, fontSize: 14, color: '#0f172a', minHeight: 100, marginBottom: 20, borderWidth: 1, borderColor: '#e2e8f0' },
-  submitReviewBtn: { width: '100%', backgroundColor: '#16a34a', paddingVertical: 16, borderRadius: 16, alignItems: 'center' },
-  submitReviewText: { color: '#ffffff', fontWeight: '800', fontSize: 16 },
-  skipBtn: { marginTop: 15 },
-  skipBtnText: { color: '#94a3b8', fontWeight: '600' },
-  btnDisabled: { opacity: 0.7 },
+  modalSubtitle: { fontSize: 14, color: '#64748b', marginBottom: 20, lineHeight: 20 },
+
+  // Detalles de Items
   orderSummaryStrip: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 20, backgroundColor: '#f8fafc', padding: 15, borderRadius: 16 },
   summaryLabel: { fontSize: 14, color: '#64748b', fontWeight: '600' },
-  sectionHeading: { fontSize: 15, fontWeight: '800', color: '#0f172a', marginVertical: 15, textTransform: 'uppercase', letterSpacing: 0.5 },
+  sectionHeading: { fontSize: 13, fontWeight: '800', color: '#0f172a', marginVertical: 15, textTransform: 'uppercase', letterSpacing: 0.5 },
   detailItemRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' },
   detailItemName: { fontSize: 15, fontWeight: '600', color: '#0f172a' },
   detailItemPrice: { fontSize: 13, color: '#64748b', marginTop: 2 },
+  originalQty: { fontSize: 11, color: '#94a3b8', marginBottom: 2 },
   fulfillmentBadge: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8 },
   fulfilledBg: { backgroundColor: '#dcfce7' },
   missingBg: { backgroundColor: '#fff1f2' },
   fulfilledText: { color: '#16a34a', fontSize: 11, fontWeight: '700' },
   missingText: { color: '#e11d48', fontSize: 11, fontWeight: '700' },
+  partialBg: { backgroundColor: '#fff7ed' },
+  partialText: { color: '#c2410c' },
+  
+  // Información de Entrega
   deliveryInfoBlock: { marginTop: 20, padding: 15, backgroundColor: '#f8fafc', borderRadius: 16 },
   deliveryText: { fontSize: 15, fontWeight: '700', color: '#0f172a' },
   deliverySubtext: { fontSize: 13, color: '#64748b', marginTop: 4 },
   adminNotesBlock: { marginTop: 20, padding: 15, backgroundColor: '#fffbeb', borderRadius: 16, borderLeftWidth: 4, borderLeftColor: '#f59e0b' },
   adminNotesTitle: { fontSize: 13, fontWeight: '800', color: '#b45309', marginBottom: 4 },
   adminNotesText: { fontSize: 13, color: '#d97706', fontStyle: 'italic' },
+  
+  // Totales y Botonera Modales
   modalTotalRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 30, paddingTop: 20, borderTopWidth: 2, borderTopColor: '#f1f5f9' },
   modalTotalLabel: { fontSize: 16, fontWeight: '600', color: '#64748b' },
   modalTotalValue: { fontSize: 24, fontWeight: '900', color: '#16a34a' },
-  closeModalBtn: { backgroundColor: '#0f172a', paddingVertical: 16, borderRadius: 16, alignItems: 'center', marginTop: 30 },
+  closeModalBtn: { backgroundColor: '#0f172a', paddingVertical: 16, borderRadius: 16, alignItems: 'center', marginTop: 20 },
   closeModalBtnText: { color: '#ffffff', fontWeight: '800', fontSize: 16 },
   manualReviewBtn: { backgroundColor: '#16a34a', paddingVertical: 12, borderRadius: 12, marginTop: 12, alignItems: 'center' },
-  manualReviewBtnText: { color: '#fff', fontWeight: '800', fontSize: 13 }
+  manualReviewBtnText: { color: '#fff', fontWeight: '800', fontSize: 13 },
+  
+  // Estilos de Reseña y Rechazo v6.6
+  label: { fontSize: 14, fontWeight: '700', color: '#0f172a', marginBottom: 8 },
+  reviewInput: { backgroundColor: '#f8fafc', borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 16, padding: 16, textAlignVertical: 'top', minHeight: 100, marginBottom: 20, color: '#0f172a' },
+  saveReviewBtn: { backgroundColor: '#16a34a', paddingVertical: 16, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  saveReviewBtnText: { color: '#fff', fontWeight: '800', fontSize: 16 },
+  starsContainer: { flexDirection: 'row', justifyContent: 'center', gap: 10, marginBottom: 20 },
+  star: { fontSize: 32 },
+  starFilled: { opacity: 1 },
+  starEmpty: { opacity: 0.2 },
 });

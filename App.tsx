@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { View, Modal, TouchableOpacity, Text, StyleSheet, ScrollView, ActivityIndicator } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { View, Modal, TouchableOpacity, Text, StyleSheet, ScrollView, ActivityIndicator, TextInput, Alert, Platform } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import HomeScreen from './src/screens/HomeScreen';
 import LandingScreen from './src/screens/LandingScreen';
@@ -12,7 +12,7 @@ import OrderStatusScreen from './src/screens/OrderStatusScreen';
 import MyOrdersScreen from './src/screens/MyOrdersScreen';
 import DeliveryDashboardScreen from './src/screens/DeliveryDashboardScreen';
 
-import { useEffect } from 'react';
+
 import { supabase } from './src/lib/supabase';
 import { useAuthStore } from './src/store/useAuthStore';
 import { Audio } from 'expo-av';
@@ -32,6 +32,11 @@ export default function App() {
   const [notifItems, setNotifItems] = useState<any[]>([]);
   const [loadingItems, setLoadingItems] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
+
+  // Estados para Rechazo de Pedido v6.6 📦❌
+  const [showRejectionInput, setShowRejectionInput] = useState(false);
+  const [rejectionReason, setRejectionReason] = useState('');
+  const [isRejecting, setIsRejecting] = useState(false);
 
   // Estado para Badge Persistente del Admin 🛡️🔴
   const [adminUnreadCount, setAdminUnreadCount] = useState(0);
@@ -86,6 +91,45 @@ export default function App() {
        // Si estamos en MyOrders, el listener local de esa pantalla refrescará la lista
     } catch (e) {
        console.error('Error confirming receipt:', e);
+    }
+  };
+
+  const handleRejectReceipt = async () => {
+    if (!notifOrder || !rejectionReason.trim()) {
+      const msg = "Por favor, indica el motivo del rechazo.";
+      return Platform.OS === 'web' ? window.alert(msg) : Alert.alert("Error", msg);
+    }
+    
+    try {
+      setIsRejecting(true);
+      console.log('📦 Reportando rechazo global para orden:', notifOrder.id);
+      
+      const { error } = await supabase
+        .from('orders')
+        .update({ 
+          status: 'No Recibido',
+          client_rejection_reason: rejectionReason,
+          client_rejected_at: new Date().toISOString(),
+          client_viewed_status: true 
+        })
+        .eq('id', notifOrder.id);
+      
+      if (error) throw error;
+      
+      const successMsg = "El administrador ha sido notificado del motivo de tu rechazo.";
+      if (Platform.OS === 'web') window.alert("Rechazo Registrado: " + successMsg);
+      else Alert.alert("Rechazo Registrado", successMsg);
+
+      setNotifVisible(false);
+      setShowRejectionInput(false);
+      setRejectionReason('');
+    } catch (e: any) {
+      console.error('❌ Error en handleRejectReceipt:', e);
+      const errMsg = e.message || "No se pudo registrar el rechazo.";
+      if (Platform.OS === 'web') window.alert("Error: " + errMsg);
+      else Alert.alert("Error", errMsg);
+    } finally {
+      setIsRejecting(false);
     }
   };
 
@@ -271,13 +315,58 @@ export default function App() {
                   </ScrollView>
                 )}
                 
-                <TouchableOpacity style={styles.confirmNotifBtn} onPress={handleConfirmReceipt}>
-                  <Text style={styles.confirmNotifBtnText}>Confirmar Recibido ✅</Text>
-                </TouchableOpacity>
+                {!showRejectionInput ? (
+                  <>
+                    <TouchableOpacity style={styles.confirmNotifBtn} onPress={handleConfirmReceipt}>
+                      <Text style={styles.confirmNotifBtnText}>Confirmar Recibido ✅</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity 
+                      style={[styles.confirmNotifBtn, { backgroundColor: '#ef4444', marginTop: 10 }]} 
+                      onPress={() => setShowRejectionInput(true)}
+                    >
+                      <Text style={styles.confirmNotifBtnText}>No Recibí el Pedido ❌</Text>
+                    </TouchableOpacity>
+                  </>
+                ) : (
+                  <View style={{ width: '100%', marginTop: 10 }}>
+                    <Text style={[styles.detailTitle, { color: '#ef4444' }]}>Motivo del Rechazo:</Text>
+                    <TextInput 
+                      style={styles.rejectionInput}
+                      placeholder="Ej: El pedido llegó incompleto, en mal estado..."
+                      value={rejectionReason}
+                      onChangeText={setRejectionReason}
+                      multiline
+                      numberOfLines={3}
+                    />
+                    <View style={{ flexDirection: 'row', gap: 10, marginTop: 15 }}>
+                      <TouchableOpacity 
+                        style={[styles.smallBtn, { flex: 1, backgroundColor: '#f1f5f9' }]} 
+                        onPress={() => setShowRejectionInput(false)}
+                      >
+                        <Text style={{ color: '#64748b', fontWeight: 'bold' }}>Volver</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity 
+                        style={[styles.smallBtn, { flex: 2, backgroundColor: '#ef4444' }]} 
+                        onPress={handleRejectReceipt}
+                        disabled={isRejecting}
+                      >
+                        {isRejecting ? <ActivityIndicator color="#fff" /> : <Text style={{ color: '#fff', fontWeight: 'bold' }}>Enviar Rechazo ✕</Text>}
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                )}
               </View>
             )}
 
-            <TouchableOpacity style={styles.closeNotifBtn} onPress={() => setNotifVisible(false)}>
+            <TouchableOpacity 
+              style={styles.closeNotifBtn} 
+              onPress={() => {
+                setNotifVisible(false);
+                setShowRejectionInput(false);
+                setRejectionReason('');
+              }}
+            >
               <Text style={styles.closeNotifText}>Cerrar</Text>
             </TouchableOpacity>
           </View>
@@ -326,5 +415,7 @@ const styles = StyleSheet.create({
   bannerIcon: { width: 44, height: 44, backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 12, justifyContent: 'center', alignItems: 'center', marginRight: 12 },
   bannerTextContent: { flex: 1 },
   bannerTitle: { color: '#ffffff', fontSize: 14, fontWeight: '800' },
-  bannerBody: { color: '#94a3b8', fontSize: 12, marginTop: 2 }
+  bannerBody: { color: '#94a3b8', fontSize: 12, marginTop: 2 },
+  rejectionInput: { backgroundColor: '#fff', borderWidth: 1, borderColor: '#fee2e2', borderRadius: 12, padding: 12, color: '#0f172a', textAlignVertical: 'top', minHeight: 80 },
+  smallBtn: { paddingVertical: 12, borderRadius: 10, alignItems: 'center', justifyContent: 'center' }
 });

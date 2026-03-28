@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
-import { 
-  View, 
-  Text, 
-  StyleSheet, 
-  TouchableOpacity, 
-  ScrollView, 
+import {
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+  ScrollView,
   FlatList,
   TextInput,
   Image,
@@ -12,15 +12,17 @@ import {
   Modal,
   ActivityIndicator,
   Alert,
-  KeyboardAvoidingView
+  KeyboardAvoidingView,
+  Dimensions
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
+import { PieChart } from 'react-native-chart-kit';
 import { supabase } from '../lib/supabase';
 import { createClient } from '@supabase/supabase-js';
 import { useAuthStore } from '../store/useAuthStore';
 
-export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCount = 0, onResetAdminUnread }: { 
-  onBack: () => void; 
+export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCount = 0, onResetAdminUnread }: {
+  onBack: () => void;
   onViewShop: () => void;
   adminUnreadCount?: number;
   onResetAdminUnread?: () => void;
@@ -31,9 +33,14 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
   const [reviews, setReviews] = useState<any[]>([]);
   const [categories, setCategories] = useState<any[]>([]);
   const [repartidores, setRepartidores] = useState<any[]>([]);
-  const [stats, setStats] = useState({ today: 0, month: 0 });
+  const [stats, setStats] = useState({ today: 0, month: 0, rejectedTotal: 0 });
+  const [salesPeriod, setSalesPeriod] = useState<'today' | 'week' | 'month' | 'custom'>('today');
+  const [analyticsDate, setAnalyticsDate] = useState(new Date().toISOString().split('T')[0]);
+  const [selectedAnalyticsRepartidor, setSelectedAnalyticsRepartidor] = useState<string>('all');
+  const [activeChartMetric, setActiveChartMetric] = useState<'revenue' | 'volume' | 'time'>('revenue');
+  const [activityFeed, setActivityFeed] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  
+
   // States for Add/Edit Product
   const [modalVisible, setModalVisible] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -100,9 +107,77 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
     try {
       if (!silent) setLoading(true);
       const { data } = await supabase.from('orders').select('*, order_reviews(*)').order('created_at', { ascending: false });
-      setOrders(data || []);
-      const pending = data ? data.filter((o: any) => o.status === 'Pendiente').sort((a: any, b: any) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()) : [];
+      const ordersData = data || [];
+      setOrders(ordersData);
+      
+      const pending = ordersData.filter((o: any) => o.status === 'Pendiente').sort((a: any, b: any) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
       setPendingOrders(pending);
+
+      // --- MOTOR DE ANALÍTICA v7.3.1 ---
+      const now = new Date();
+      let startDate = new Date();
+      startDate.setHours(0, 0, 0, 0);
+
+      if (salesPeriod === 'week') {
+        startDate.setDate(now.getDate() - 7);
+      } else if (salesPeriod === 'month') {
+        startDate.setMonth(now.getMonth() - 1);
+      } else if (salesPeriod === 'custom') {
+        startDate = new Date(analyticsDate);
+        startDate.setHours(0, 0, 0, 0);
+      }
+
+      const endDate = salesPeriod === 'custom' ? new Date(startDate) : new Date(now);
+      if (salesPeriod === 'custom') endDate.setHours(23, 59, 59, 999);
+
+      const filteredOrders = ordersData.filter((o: any) => {
+        // --- LÓGICA DE FECHA INTELIGENTE v7.5 ---
+        // Para ventas: Usamos fecha de confirmación o entrega
+        // Para rechazos: Usamos fecha de rechazo cliente
+        // Fallback: created_at
+        const eventDateStr = o.status === 'No Recibido' 
+          ? (o.client_rejected_at || o.created_at)
+          : (o.client_confirmed_at || o.delivered_at || o.created_at);
+          
+        const orderDate = new Date(eventDateStr);
+        return orderDate >= startDate && orderDate <= endDate;
+      });
+
+      let finalFiltered = filteredOrders;
+      if (selectedAnalyticsRepartidor !== 'all') {
+        finalFiltered = finalFiltered.filter((o: any) => o.repartidor_id === selectedAnalyticsRepartidor);
+      }
+
+      const successStates = ['Entregado', 'Confirmado', 'Liquidado'];
+      const totalSales = finalFiltered
+        .filter((o: any) => successStates.includes(o.status))
+        .reduce((acc: number, o: any) => acc + parseFloat(o.total || 0), 0);
+
+      const totalRejected = finalFiltered
+        .filter((o: any) => o.status === 'No Recibido')
+        .reduce((acc: number, o: any) => acc + parseFloat(o.total || 0), 0);
+
+      setStats({
+        today: totalSales, 
+        month: ordersData.filter((o: any) => successStates.includes(o.status)).reduce((acc: number, o: any) => acc + parseFloat(o.total || 0), 0), 
+        rejectedTotal: totalRejected 
+      });
+
+      // --- CENTRO DE ACTIVIDAD v7.3.1 ---
+      const { data: revData } = await (supabase as any).from('order_reviews').select('*, orders(customer_name)').order('created_at', { ascending: false }).limit(5);
+      const feedReviews = (revData || []).map((r: any) => ({ ...r, feedType: 'review', date: r.created_at }));
+      
+      const feedRejections = ordersData
+        .filter((o: any) => o.status === 'No Recibido' && o.client_rejection_reason)
+        .slice(0, 5)
+        .map((o: any) => ({ ...o, feedType: 'rejection', date: o.client_rejected_at || o.created_at }));
+
+      const combinedFeed = [...feedReviews, ...feedRejections]
+        .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+        .slice(0, 5);
+      
+      setActivityFeed(combinedFeed);
+
     } finally {
       if (!silent) setLoading(false);
     }
@@ -121,18 +196,19 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
   };
 
   const fetchAuxiliar = async () => {
-     const { data: revData } = await (supabase as any).from('order_reviews').select('*, orders(customer_name)').order('created_at', { ascending: false });
-     setReviews(revData || []);
-     const { data: catData } = await supabase.from('categories').select('*').order('name', { ascending: true });
-     setCategories(catData || []);
+    const { data: revData } = await (supabase as any).from('order_reviews').select('*, orders(customer_name)').order('created_at', { ascending: false });
+    setReviews(revData || []);
+    const { data: catData } = await supabase.from('categories').select('*').order('name', { ascending: true });
+    setCategories(catData || []);
   };
 
   const fetchData = async () => {
     try {
       setLoading(true);
+      // Siempre refrescar órdenes primero para inyectar stats
+      await fetchOrders(true);
       await Promise.all([
         fetchInventory(),
-        fetchOrders(true),
         fetchRepartidores(),
         fetchSettlements(),
         fetchAuxiliar()
@@ -145,6 +221,10 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
   };
 
   React.useEffect(() => {
+    fetchOrders(true);
+  }, [salesPeriod, analyticsDate, selectedAnalyticsRepartidor]);
+
+  React.useEffect(() => {
     // Carga inicial
     fetchData();
 
@@ -153,34 +233,34 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
 
     // Suscripción Real-time de Ultra-Baja Latencia 🚀
     const subscription = supabase
-      .channel('admin-live-orders-v3') 
+      .channel('admin-live-orders-v3')
       .on(
-        'postgres_changes', 
-        { event: '*', schema: 'public', table: 'orders' }, 
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'orders' },
         (payload: any) => {
-          console.log('🔔 Evento Real-time:', payload.eventType);
-          
-          if (payload.eventType === 'INSERT') {
-             const newOrder = payload.new;
-             // 1. INYECCIÓN DIRECTA (instantánea en segundos)
-             setOrders(prev => [newOrder, ...prev]);
-             if (newOrder.status === 'Pendiente') {
-                setPendingOrders(prev => [...prev, newOrder].sort((a: any, b: any) => 
-                  new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-                ));
-             }
-             
-             // 2. REFRESH LIGERO (solo órdenes, no toda la base de datos)
-             fetchOrders(true);
+          console.log('🔔 Cambio detectado en pedido:', (payload.new as any).id, 'Status:', (payload.new as any).status);
 
-             Alert.alert(
-               "🔔 ¡Nuevo Pedido Entrante!", 
-               `Cliente: ${newOrder.customer_name || 'Desconocido'}\nMonto: $${parseFloat(newOrder.total).toLocaleString()}`,
-               [{ text: "Ver Pedidos", onPress: () => { setNotifModalVisible(true); fetchOrders(true); } }]
-             );
+          if (payload.eventType === 'INSERT') {
+            const newOrder = payload.new;
+            // 1. INYECCIÓN DIRECTA (instantánea en segundos)
+            setOrders(prev => [newOrder, ...prev]);
+            if (newOrder.status === 'Pendiente') {
+              setPendingOrders(prev => [...prev, newOrder].sort((a: any, b: any) =>
+                new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+              ));
+            }
+
+            // 2. REFRESH LIGERO (solo órdenes, no toda la base de datos)
+            fetchOrders(true);
+
+            Alert.alert(
+              "🔔 ¡Nuevo Pedido Entrante!",
+              `Cliente: ${newOrder.customer_name || 'Desconocido'}\nMonto: $${parseFloat(newOrder.total).toLocaleString()}`,
+              [{ text: "Ver Pedidos", onPress: () => { setNotifModalVisible(true); fetchOrders(true); } }]
+            );
           } else {
-             // Si el estado de la orden cambia, solo refrescamos órdenes
-             fetchOrders(true);
+            // Si el estado de la orden cambia, solo refrescamos órdenes
+            fetchOrders(true);
           }
         }
       )
@@ -232,10 +312,10 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
   const handleSave = async () => {
     if (!name || !price || !stock) return Alert.alert("Error", "Completa todos los campos");
     setSaving(true);
-    const productData = { 
-      name, 
-      price: parseFloat(price), 
-      stock: parseInt(stock), 
+    const productData = {
+      name,
+      price: parseFloat(price),
+      stock: parseInt(stock),
       category,
       description,
       image_url: image || 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=500&q=80'
@@ -269,20 +349,20 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
     }
 
     if (newStatus === 'Cancelado') {
-       const { error } = await supabase.from('orders').update({ status: 'Cancelado', client_viewed_status: false }).eq('id', id);
-       if (!error) {
-          fetchOrders(true);
-          return;
-       }
+      const { error } = await supabase.from('orders').update({ status: 'Cancelado', client_viewed_status: false }).eq('id', id);
+      if (!error) {
+        fetchOrders(true);
+        return;
+      }
     }
 
     // Si el administrador "Atiende", pasamos directo a Preparación
     const statusToUpdate = newStatus === 'Recibida' ? 'Preparación' : newStatus;
-    
+
     // Al actualizar estado, marcamos que el cliente NO lo ha visto aún
     const { error } = await supabase
       .from('orders')
-      .update({ 
+      .update({
         status: statusToUpdate,
         client_viewed_status: false,
         ...(statusToUpdate === 'Preparación' ? { prepared_at: new Date().toISOString() } : {})
@@ -307,9 +387,9 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
       const order = orders.find(o => o.id === orderId);
       setCheckingOrder(order);
       // Inicializar fulfilled_quantity con la cantidad solicitada (o la ya guardada)
-      setCheckingItems(itemsData.map((it: any) => ({ 
-        ...it, 
-        fulfilled_quantity: it.fulfilled_quantity !== null ? it.fulfilled_quantity : it.quantity 
+      setCheckingItems(itemsData.map((it: any) => ({
+        ...it,
+        fulfilled_quantity: it.fulfilled_quantity !== null ? it.fulfilled_quantity : it.quantity
       })));
       setIsChecklistModalVisible(true);
     } catch (err: any) {
@@ -325,7 +405,7 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
         if (it.fulfilled_quantity === 0) return `${it.products.name} (Agotado)`;
         return `${it.products.name} (${it.fulfilled_quantity} de ${it.quantity} despachados)`;
       }).join(", ");
-      
+
       notes = "⚠️ Novedades en el pedido: " + detailedNotes + ". El resto ha sido preparado correctamente.";
     }
     setFulfillmentNotes(notes);
@@ -340,9 +420,9 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
       `¿Estás seguro de que deseas revocar el acceso a ${rep.full_name || 'este repartidor'}?\n\nPerderá su acceso a la plataforma de envíos inmediatamente.`,
       [
         { text: "Cancelar", style: "cancel" },
-        { 
-          text: "Eliminar", 
-          style: "destructive", 
+        {
+          text: "Eliminar",
+          style: "destructive",
           onPress: async () => {
             const { error } = await supabase.from('profiles').update({ role: 'client' }).eq('id', rep.id);
             if (error) Alert.alert("Error", error.message);
@@ -359,7 +439,7 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
   const openEditRepForm = (rep: any) => {
     setEditingRepId(rep.id);
     setRepName(rep.full_name || '');
-    
+
     // Extraer código de país +57 322...
     if (rep.phone && rep.phone.startsWith('+')) {
       const parts = rep.phone.split(' ');
@@ -369,10 +449,10 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
       setRepCountryCode('+57');
       setRepPhone(rep.phone || '');
     }
-    
+
     // Phase 41: Priorizar Username sobre Email (para rescatar legados)
     setRepEmail(rep.username || '');
-    
+
     setRepPassword('');
     setRepModalVisible(true);
   };
@@ -381,25 +461,25 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
     if (!repName || !repPhone || !repCountryCode || (!editingRepId && !repEmail)) {
       return Alert.alert("Error", "Completa nombre, teléfono y usuario.");
     }
-    
+
     if (!editingRepId && !repPassword) {
       return Alert.alert("Error", "Debes asignar una contraseña para el nuevo repartidor.");
     }
-    
+
     if (!editingRepId && repPassword.length < 6) {
       return Alert.alert("Error", "La contraseña debe tener mínimo 6 caracteres.");
     }
-    
+
     setRepSaving(true);
     try {
       const fullPhone = `${repCountryCode.trim()} ${repPhone.trim()}`;
 
       if (editingRepId) {
-        const updateData: any = { 
-          full_name: repName, 
-          phone: fullPhone 
+        const updateData: any = {
+          full_name: repName,
+          phone: fullPhone
         };
-        
+
         // Phase 41: Permitir setear username si no tenía
         const currentRep = repartidores.find(r => r.id === editingRepId);
         if (!currentRep?.username && repEmail) {
@@ -412,7 +492,7 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
         }
 
         await supabase.from('profiles').update(updateData).eq('id', editingRepId);
-        
+
         Alert.alert("Éxito", "Perfil y credenciales actualizados correctamente.");
       } else {
         // Phase 41: Creación Directa usando RPC Server-Side para evitar límites de correo (429)
@@ -422,18 +502,18 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
           p_full_name: repName,
           p_phone: fullPhone
         });
-        
+
         if (rpcErr) throw rpcErr;
-        
+
         if (rpcData && rpcData.error) {
           Alert.alert("Error", rpcData.error);
           return;
         }
 
         Alert.alert("¡Éxito!", `Repartidor creado exitosamente. Ya puede iniciar sesión con el usuario "${repEmail.trim().toLowerCase()}".`);
-      } 
+      }
       // <-- Cierre del else principal
-      
+
       setRepModalVisible(false);
       setEditingRepId(null);
       setRepEmail('');
@@ -456,9 +536,9 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
       for (const item of checkingItems) {
         await supabase
           .from('order_items')
-          .update({ 
+          .update({
             fulfilled_quantity: item.fulfilled_quantity,
-            is_fulfilled: item.fulfilled_quantity > 0 
+            is_fulfilled: item.fulfilled_quantity > 0
           })
           .eq('id', item.id);
       }
@@ -466,16 +546,16 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
       // 2. Actualizar el estado de la orden asignando al repartidor
       const { error } = await supabase
         .from('orders')
-        .update({ 
+        .update({
           status: 'Enviado',
           notes: fulfillmentNotes,
           shipped_at: new Date().toISOString(),
           repartidor_id: selectedRepId, // ASIGNACIÓN CRÍTICA
-          client_viewed_status: false 
+          client_viewed_status: false
         })
         .eq('id', checkingOrder.id);
       if (error) throw error;
-      
+
       setIsSummaryModalVisible(false);
       setCheckingOrder(null);
       setSelectedRepId(null);
@@ -496,7 +576,7 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
         .select('*, products(name)')
         .eq('order_id', order.id);
       if (error) throw error;
-      
+
       // Buscar información del repartidor si tiene
       let repInfo = null;
       if (order.repartidor_id) {
@@ -516,11 +596,12 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
   const handleDelete = (id: string) => {
     Alert.alert("Eliminar Producto", "¿Estás seguro de que quieres borrar este producto?", [
       { text: "Cancelar", style: "cancel" },
-      { text: "Eliminar", style: "destructive", onPress: async () => {
+      {
+        text: "Eliminar", style: "destructive", onPress: async () => {
           const { error } = await supabase.from('products').delete().eq('id', id);
           if (error) Alert.alert("Error", error.message);
           else fetchData();
-        } 
+        }
       }
     ]);
   };
@@ -571,55 +652,285 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
 
   const renderSales = () => (
     <View style={styles.tabContent}>
-      <Text style={styles.sectionTitle}>Resumen de Ventas</Text>
-      <View style={styles.statsRow}>
-        <View style={styles.statBox}>
-          <Text style={styles.statLabel}>Hoy</Text>
-          <Text style={styles.statValue}>${stats.today.toLocaleString()}</Text>
-        </View>
-        <View style={styles.statBox}>
-          <Text style={styles.statLabel}>Total</Text>
-          <Text style={styles.statValue}>${stats.month.toLocaleString()}</Text>
-        </View>
-      </View>
-      <Text style={[styles.sectionTitle, { marginTop: 30 }]}>Gráfico de Rendimiento</Text>
-      <View style={styles.mockChart}><Text style={{color: '#64748b'}}>Visualización de datos en tiempo real...</Text></View>
+      <Text style={styles.sectionTitle}>Análisis de Operación 📊</Text>
+      <Text style={{ fontSize: 10, color: '#64748b', marginBottom: 15, fontWeight: '700' }}>
+        ✓ Incluyendo datos de jornadas ya cerradas y liquidadas
+      </Text>
+      
+      {/* Sistema de Filtros de Tiempo */}
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterScroll}>
+        {[
+          { id: 'today', label: 'Hoy' },
+          { id: 'week', label: 'Semana' },
+          { id: 'month', label: 'Mes' },
+          { id: 'custom', label: 'Día Especial 📅' }
+        ].map(p => (
+          <TouchableOpacity 
+            key={p.id} 
+            style={[styles.filterChip, salesPeriod === p.id && styles.filterChipActive]}
+            onPress={() => setSalesPeriod(p.id as any)}
+          >
+            <Text style={[styles.filterText, salesPeriod === p.id && styles.filterTextActive]}>{p.label}</Text>
+          </TouchableOpacity>
+        ))}
+      </ScrollView>
 
-      <Text style={[styles.sectionTitle, { marginTop: 30 }]}>Rendimiento por Repartidor 🛵</Text>
-      {repartidores.length === 0 ? (
-        <Text style={styles.emptyText}>No hay repartidores para analizar.</Text>
-      ) : (
-        repartidores.map(rep => {
-          const repOrders = orders.filter(o => o.repartidor_id === rep.id && o.status === 'Entregado');
-          const total = repOrders.reduce((acc, o) => acc + parseFloat(o.total), 0);
-          return (
-            <View key={rep.id} style={styles.repMiniStat}>
-              <Text style={styles.repMiniName}>{rep.full_name || rep.email}</Text>
-              <Text style={styles.repMiniValue}>${total.toLocaleString()} ({repOrders.length} ped.)</Text>
-            </View>
-          );
-        })
+      {salesPeriod === 'custom' && (
+        <View style={styles.customDateBox}>
+          <Text style={styles.label}>Ingresa la fecha (AAAA-MM-DD):</Text>
+          <TextInput 
+            style={styles.input} 
+            value={analyticsDate} 
+            onChangeText={setAnalyticsDate} 
+            placeholder="2024-03-25"
+          />
+        </View>
       )}
 
-      <Text style={[styles.sectionTitle, { marginTop: 30 }]}>Últimas Reseñas ⭐</Text>
-      {reviews.length === 0 ? (
-        <Text style={styles.emptyText}>Aún no hay reseñas de clientes.</Text>
+      {/* Filtro por Repartidor */}
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={[styles.filterScroll, { marginTop: 10 }]}>
+        <TouchableOpacity 
+          style={[styles.filterChip, selectedAnalyticsRepartidor === 'all' && styles.filterChipActive, { backgroundColor: selectedAnalyticsRepartidor === 'all' ? '#1e293b' : '#f1f5f9' }]}
+          onPress={() => setSelectedAnalyticsRepartidor('all')}
+        >
+          <Text style={[styles.filterText, selectedAnalyticsRepartidor === 'all' && styles.filterTextActive]}>Toda la Flota</Text>
+        </TouchableOpacity>
+        {repartidores.map(rep => (
+          <TouchableOpacity 
+            key={rep.id} 
+            style={[styles.filterChip, selectedAnalyticsRepartidor === rep.id && styles.filterChipActive, { backgroundColor: selectedAnalyticsRepartidor === rep.id ? '#1e293b' : '#f1f5f9' }]}
+            onPress={() => setSelectedAnalyticsRepartidor(rep.id)}
+          >
+            <Text style={[styles.filterText, selectedAnalyticsRepartidor === rep.id && styles.filterTextActive]}>{rep.full_name || rep.email}</Text>
+          </TouchableOpacity>
+        ))}
+      </ScrollView>
+
+      <View style={styles.statsRow}>
+        <View style={[styles.statBox, { backgroundColor: '#f0fdf4', borderColor: '#16a34a' }]}>
+          <Text style={[styles.statLabel, { color: '#166534' }]}>Ventas Exitosas</Text>
+          <Text style={[styles.statValue, { color: '#16a34a' }]}>${stats.today.toLocaleString()}</Text>
+          <Text style={{ fontSize: 10, color: '#15803d', marginTop: 4 }}>{selectedAnalyticsRepartidor === 'all' ? 'Periodo seleccionado' : 'Filtrado por mensajero'}</Text>
+        </View>
+        <View style={[styles.statBox, { backgroundColor: '#fff1f2', borderColor: '#ef4444' }]}>
+          <Text style={[styles.statLabel, { color: '#991b1b' }]}>No Recibidos</Text>
+          <Text style={[styles.statValue, { color: '#ef4444' }]}>${stats.rejectedTotal.toLocaleString()}</Text>
+          <Text style={{ fontSize: 10, color: '#991b1b', marginTop: 4 }}>Pérdida potencial</Text>
+        </View>
+      </View>
+
+      {/* Gráfico de Torta v8.5 */}
+      {(stats.today > 0 || stats.rejectedTotal > 0) && (
+        <View style={{ marginTop: 20, alignItems: 'center', backgroundColor: '#fff', paddingVertical: 15, paddingHorizontal: 10, borderRadius: 20, elevation: 1 }}>
+          <Text style={{ fontSize: 15, fontWeight: 'bold', color: '#1e293b', marginBottom: 5 }}>Balance General 🥧</Text>
+          <Text style={{ fontSize: 11, color: '#64748b', marginBottom: 15 }}>Distribución financiera del periodo</Text>
+          <PieChart
+            data={[
+              {
+                name: 'Exitosas',
+                population: stats.today,
+                color: '#16a34a',
+                legendFontColor: '#334155',
+                legendFontSize: 12,
+              },
+              {
+                name: 'No Recibidos',
+                population: stats.rejectedTotal,
+                color: '#ef4444',
+                legendFontColor: '#334155',
+                legendFontSize: 12,
+              }
+            ]}
+            width={Dimensions.get('window').width - 60}
+            height={140}
+            chartConfig={{
+              color: (opacity = 1) => `rgba(0, 0, 0, ${opacity})`,
+            }}
+            accessor={"population"}
+            backgroundColor={"transparent"}
+            paddingLeft={"0"}
+            center={[15, 0]}
+            absolute={false}
+          />
+        </View>
+      )}
+
+      {/* COMPONENTES DE GRÁFICAS - ANALÍTICA POR MENSAJERO */}
+      <View style={{ marginTop: 25, backgroundColor: '#fff', borderRadius: 20, padding: 20, elevation: 2 }}>
+        <Text style={[styles.sectionTitle, { marginTop: 0, marginBottom: 15 }]}>Comparativa de Rendimiento 📈</Text>
+        
+        {/* Lente de Métrica */}
+        <View style={{ flexDirection: 'row', backgroundColor: '#f8fafc', borderRadius: 12, padding: 4, marginBottom: 20 }}>
+          <TouchableOpacity 
+            style={[styles.tabButton, activeChartMetric === 'revenue' && { backgroundColor: '#fff', elevation: 1 }]}
+            onPress={() => setActiveChartMetric('revenue')}
+          >
+            <Text style={[styles.tabText, { color: activeChartMetric === 'revenue' ? '#0f172a' : '#64748b' }]}>$ Recaudo</Text>
+          </TouchableOpacity>
+          <TouchableOpacity 
+            style={[styles.tabButton, activeChartMetric === 'volume' && { backgroundColor: '#fff', elevation: 1 }]}
+            onPress={() => setActiveChartMetric('volume')}
+          >
+            <Text style={[styles.tabText, { color: activeChartMetric === 'volume' ? '#0f172a' : '#64748b' }]}># Volumen</Text>
+          </TouchableOpacity>
+          <TouchableOpacity 
+            style={[styles.tabButton, activeChartMetric === 'time' && { backgroundColor: '#fff', elevation: 1 }]}
+            onPress={() => setActiveChartMetric('time')}
+          >
+            <Text style={[styles.tabText, { color: activeChartMetric === 'time' ? '#0f172a' : '#64748b' }]}>⚡ Tiempo</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Dynamic Bars */}
+        {(() => {
+          const now = new Date();
+          let startDate = new Date();
+          startDate.setHours(0, 0, 0, 0);
+          if (salesPeriod === 'week') startDate.setDate(now.getDate() - 7);
+          else if (salesPeriod === 'month') startDate.setMonth(now.getMonth() - 1);
+          else if (salesPeriod === 'custom') {
+            startDate = new Date(analyticsDate);
+            startDate.setHours(0, 0, 0, 0);
+          }
+          const endDate = salesPeriod === 'custom' ? new Date(startDate) : new Date(now);
+          if (salesPeriod === 'custom') endDate.setHours(23, 59, 59, 999);
+
+          const periodOrders = orders.filter(o => {
+            const evDate = o.status === 'No Recibido' ? (o.client_rejected_at || o.created_at) : (o.client_confirmed_at || o.delivered_at || o.created_at);
+            const d = new Date(evDate);
+            return d >= startDate && d <= endDate;
+          });
+
+          const chartData = repartidores.map(rep => {
+            const rOps = periodOrders.filter(o => o.repartidor_id === rep.id);
+            const succ = rOps.filter(o => ['Entregado', 'Confirmado', 'Liquidado'].includes(o.status));
+            const rejs = rOps.filter(o => o.status === 'No Recibido');
+            const rev = succ.reduce((acc, o) => acc + parseFloat(o.total || 0), 0);
+            const loss = rejs.reduce((acc, o) => acc + parseFloat(o.total || 0), 0);
+
+            let tMins = 0, tDels = 0;
+            succ.forEach(o => {
+              if (o.shipped_at && o.delivered_at) {
+                tMins += Math.max(0, (new Date(o.delivered_at).getTime() - new Date(o.shipped_at).getTime()) / 60000);
+                tDels++;
+              }
+            });
+            const time = tDels > 0 ? (tMins / tDels) : 0;
+
+            return { id: rep.id, name: rep.full_name || rep.email, rev, loss, vol: succ.length, volL: rejs.length, time, totalVol: succ.length + rejs.length, totalRev: rev + loss };
+          });
+
+          if (chartData.filter(d => activeChartMetric === 'time' ? (d.time > 0) : (d.totalRev > 0 || d.totalVol > 0)).length === 0) {
+            return <Text style={styles.emptyText}>Sin datos en este periodo.</Text>;
+          }
+
+          const displayData = selectedAnalyticsRepartidor === 'all' ? chartData : chartData.filter(d => d.id === selectedAnalyticsRepartidor);
+
+          if (activeChartMetric === 'revenue') {
+            const maxVal = Math.max(...displayData.map(d => d.totalRev), 1);
+            return displayData.map(d => {
+              if (selectedAnalyticsRepartidor === 'all' && d.totalRev === 0) return null;
+              return (
+                <View key={d.id} style={{ marginBottom: 15 }}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <Text style={{ fontSize: 12, fontWeight: 'bold', color: '#334155' }}>{d.name}</Text>
+                    <Text style={{ fontSize: 10, color: '#64748b' }}>${d.rev.toLocaleString()} ✅   |   ${d.loss.toLocaleString()} ✕</Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', height: 12, backgroundColor: '#f1f5f9', borderRadius: 6, overflow: 'hidden' }}>
+                    <View style={{ width: `${(d.rev / maxVal) * 100}%`, backgroundColor: '#16a34a' }} />
+                    <View style={{ width: `${(d.loss / maxVal) * 100}%`, backgroundColor: '#ef4444' }} />
+                  </View>
+                </View>
+              )
+            });
+          }
+
+          if (activeChartMetric === 'volume') {
+            const maxVal = Math.max(...displayData.map(d => d.totalVol), 1);
+            return displayData.map(d => {
+              if (selectedAnalyticsRepartidor === 'all' && d.totalVol === 0) return null;
+              return (
+                <View key={d.id} style={{ marginBottom: 15 }}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <Text style={{ fontSize: 12, fontWeight: 'bold', color: '#334155' }}>{d.name}</Text>
+                    <Text style={{ fontSize: 10, color: '#64748b' }}>{d.vol} Pedidos ✅   |   {d.volL} Fallos ✕</Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', height: 12, backgroundColor: '#f1f5f9', borderRadius: 6, overflow: 'hidden' }}>
+                    <View style={{ width: `${(d.vol / maxVal) * 100}%`, backgroundColor: '#2563eb' }} />
+                    <View style={{ width: `${(d.volL / maxVal) * 100}%`, backgroundColor: '#ef4444' }} />
+                  </View>
+                </View>
+              )
+            });
+          }
+
+          if (activeChartMetric === 'time') {
+            const maxVal = Math.max(...displayData.map(d => d.time), 1);
+            return displayData.map(d => {
+              if (selectedAnalyticsRepartidor === 'all' && d.time === 0) return null;
+              return (
+                <View key={d.id} style={{ marginBottom: 15 }}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <Text style={{ fontSize: 12, fontWeight: 'bold', color: '#334155' }}>{d.name}</Text>
+                    <Text style={{ fontSize: 10, color: '#f59e0b', fontWeight: 'bold' }}>{d.time.toFixed(1)} mins prom.</Text>
+                  </View>
+                  <View style={{ height: 12, backgroundColor: '#f1f5f9', borderRadius: 6, overflow: 'hidden' }}>
+                    <View style={{ width: `${(d.time / maxVal) * 100}%`, backgroundColor: '#f59e0b', height: '100%', borderRadius: 6 }} />
+                  </View>
+                </View>
+              );
+            });
+          }
+        })()}
+      </View>
+
+      <Text style={[styles.sectionTitle, { marginTop: 30 }]}>Centro de Actividad v7.3 ⭐</Text>
+      {activityFeed.length === 0 ? (
+        <Text style={styles.emptyText}>No hay actividad reciente.</Text>
       ) : (
-        reviews.map(review => (
-          <View key={review.id} style={styles.reviewCard}>
+        activityFeed.map((item, idx) => (
+          <View key={idx} style={[styles.reviewCard, item.feedType === 'rejection' && { borderLeftColor: '#ef4444', borderLeftWidth: 4 }]}>
             <View style={styles.reviewHead}>
-              <Text style={styles.reviewCustomer}>{review.orders?.customer_name || 'Cliente'}</Text>
-              <View style={styles.starsSmall}>
-                {[1, 2, 3, 4, 5].map(s => (
-                  <Text key={s} style={{ fontSize: 10, opacity: s <= review.rating ? 1 : 0.2 }}>⭐</Text>
-                ))}
-              </View>
+              <Text style={styles.reviewCustomer}>{item.orders?.customer_name || item.customer_name || 'Cliente'}</Text>
+              {item.feedType === 'review' ? (
+                <View style={styles.starsSmall}>
+                  {[1, 2, 3, 4, 5].map(s => (
+                    <Text key={s} style={{ fontSize: 10, opacity: s <= item.rating ? 1 : 0.2 }}>⭐</Text>
+                  ))}
+                </View>
+              ) : (
+                <View style={{ backgroundColor: '#fee2e2', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 }}>
+                   <Text style={{ fontSize: 9, color: '#ef4444', fontWeight: 'bold' }}>RECHAZO ✕</Text>
+                </View>
+              )}
             </View>
-            <Text style={styles.reviewComment}>"{review.comment || 'Sin comentario'}"</Text>
-            <Text style={styles.reviewDate}>{new Date(review.created_at).toLocaleDateString()}</Text>
+            <Text style={[styles.reviewComment, item.feedType === 'rejection' && { color: '#991b1b', fontWeight: '700' }]}>
+              {item.feedType === 'review' ? `"${item.comment || 'Sin comentario'}"` : `Motivo: ${item.client_rejection_reason || 'No especificado'}`}
+            </Text>
+            <Text style={styles.reviewDate}>
+              {new Date(item.date).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+            </Text>
           </View>
         ))
       )}
+
+      <Text style={[styles.sectionTitle, { marginTop: 30 }]}>Rendimiento Acumulado 🛵</Text>
+      <View style={styles.repStatContainer}>
+        {repartidores.length === 0 ? (
+          <Text style={styles.emptyText}>No hay repartidores para analizar.</Text>
+        ) : (
+          repartidores.map(rep => {
+            const repOrders = orders.filter(o => o.repartidor_id === rep.id && (o.status === 'Entregado' || o.status === 'Confirmado'));
+            const total = repOrders.reduce((acc, o) => acc + parseFloat(o.total), 0);
+            return (
+              <View key={rep.id} style={styles.repMiniStat}>
+                <Text style={styles.repMiniName}>{rep.full_name || rep.email}</Text>
+                <Text style={styles.repMiniValue}>${total.toLocaleString()} ({repOrders.length} ped.)</Text>
+              </View>
+            );
+          })
+        )}
+      </View>
     </View>
   );
 
@@ -635,7 +946,7 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
   const handleDeleteCategory = async (id: string) => {
     Alert.alert("Borrar Categoría", "¿Seguro?", [
       { text: "Cancelar", style: "cancel" },
-      { text: "Borrar", style: "destructive", onPress: async () => { await supabase.from('categories').delete().eq('id', id); fetchData(); }}
+      { text: "Borrar", style: "destructive", onPress: async () => { await supabase.from('categories').delete().eq('id', id); fetchData(); } }
     ]);
   };
 
@@ -655,22 +966,23 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
   );
 
   const renderRepartidores = () => {
-    const repartidorStats: { [key: string]: { entregas: number; pendientes: number; recaudado: number; total_tiempo: number } } = {};
+    const repartidorStats: { [key: string]: { entregas: number; pendientes: number; recaudado: number; total_tiempo: number; rechazados: number } } = {};
 
     orders.forEach(order => {
       // Solo sumamos a las estadísticas activas lo que NO ha sido liquidado
       if (order.repartidor_id && !order.is_settled) {
         if (!repartidorStats[order.repartidor_id]) {
-          repartidorStats[order.repartidor_id] = { entregas: 0, pendientes: 0, recaudado: 0, total_tiempo: 0 };
+          repartidorStats[order.repartidor_id] = { entregas: 0, pendientes: 0, recaudado: 0, total_tiempo: 0, rechazados: 0 };
         }
 
         const isDelivered = ['Entregado', 'Confirmado'].includes(order.status);
         const isPending = order.status === 'Enviado';
+        const isRejected = order.status === 'No Recibido';
 
         if (isDelivered) {
           repartidorStats[order.repartidor_id].entregas += 1;
           repartidorStats[order.repartidor_id].recaudado += parseFloat(order.total || 0);
-          
+
           if (order.delivered_at && order.shipped_at) {
             const diff = new Date(order.delivered_at).getTime() - new Date(order.shipped_at).getTime();
             const minutes = Math.max(0, diff / 1000 / 60);
@@ -678,6 +990,8 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
           }
         } else if (isPending) {
           repartidorStats[order.repartidor_id].pendientes += 1;
+        } else if (isRejected) {
+          repartidorStats[order.repartidor_id].rechazados += 1;
         }
       }
     });
@@ -696,10 +1010,10 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
         ) : (
           <>
             {repartidores.map(rep => {
-               const stats = repartidorStats[rep.id] || { entregas: 0, pendientes: 0, recaudado: 0, total_tiempo: 0 };
-               const avgTime = stats.entregas > 0 ? (stats.total_tiempo / stats.entregas).toFixed(1) : '0';
-               const isPendingClosure = rep.shift_status === 'pending_closure';
-               return (
+              const stats = repartidorStats[rep.id] || { entregas: 0, pendientes: 0, recaudado: 0, total_tiempo: 0 };
+              const avgTime = stats.entregas > 0 ? (stats.total_tiempo / stats.entregas).toFixed(1) : '0';
+              const isPendingClosure = rep.shift_status === 'pending_closure';
+              return (
                 <View key={rep.id} style={styles.repCard}>
                   <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                     <View style={styles.repInfo}>
@@ -717,22 +1031,29 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
                     </View>
                   </View>
                   <View style={styles.repStatsRow}>
-                    <View style={styles.repStatItem}>
-                      <Text style={styles.repStatVal}>{stats.entregas} | {stats.pendientes}</Text>
-                      <Text style={styles.repStatLab}>Entr. | Pend.</Text>
+                    <View style={[styles.repStatItem, { backgroundColor: '#eff6ff', borderRadius: 12, paddingVertical: 10 }]}>
+                      <Text style={[styles.repStatVal, { color: '#2563eb' }]}>{stats.pendientes}</Text>
+                      <Text style={styles.repStatLab}>Ruta 🔵</Text>
                     </View>
-                    <View style={styles.repStatItem}>
-                      <Text style={styles.repStatVal}>${stats.recaudado.toLocaleString()}</Text>
-                      <Text style={styles.repStatLab}>Recaudado</Text>
+                    <View style={[styles.repStatItem, { backgroundColor: '#f0fdf4', borderRadius: 12, paddingVertical: 10 }]}>
+                      <Text style={[styles.repStatVal, { color: '#16a34a' }]}>{stats.entregas}</Text>
+                      <Text style={styles.repStatLab}>Entr. ✅</Text>
                     </View>
-                    <View style={styles.repStatItem}>
-                      <Text style={styles.repStatVal}>{avgTime}m</Text>
-                      <Text style={styles.repStatLab}>Promedio Entrega</Text>
+                    <View style={[styles.repStatItem, { backgroundColor: '#fff1f2', borderRadius: 12, paddingVertical: 10 }]}>
+                      <Text style={[styles.repStatVal, { color: '#ef4444' }]}>{stats.rechazados || 0}</Text>
+                      <Text style={styles.repStatLab}>No Entregados ✕</Text>
+                    </View>
+                    <View style={[styles.repStatItem, { backgroundColor: '#fffbeb', borderRadius: 12, paddingVertical: 10 }]}>
+                      <Text style={[styles.repStatVal, { color: '#d97706' }]}>${stats.recaudado.toLocaleString()}</Text>
+                      <Text style={styles.repStatLab}>Caja 💰</Text>
                     </View>
                   </View>
+                  <Text style={[styles.repStatLab, { textAlign: 'right', marginTop: 8, fontSize: 8, opacity: 0.6 }]}>
+                    ⚡ TIEMPO PROM: {avgTime}m
+                  </Text>
 
                   {isPendingClosure && (
-                    <TouchableOpacity 
+                    <TouchableOpacity
                       style={styles.approveClosureBtn}
                       onPress={() => {
                         setConfirmingData({ rep, stats });
@@ -756,7 +1077,7 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
                       <Text style={styles.repEmail}>{invite.email}</Text>
                       {invite.phone && <Text style={styles.repStatLab}>📞 {invite.phone}</Text>}
                     </View>
-                    <TouchableOpacity 
+                    <TouchableOpacity
                       style={{ padding: 8 }}
                       onPress={async () => {
                         await supabase.from('staff_pre_auth').delete().eq('email', invite.email);
@@ -789,7 +1110,7 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Historial de Liquidaciones 📑</Text>
         </View>
-        
+
         {Object.keys(grouped).length === 0 ? (
           <Text style={styles.emptyText}>No hay liquidaciones registradas aún.</Text>
         ) : Object.keys(grouped).map(date => (
@@ -800,15 +1121,24 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
                 <View style={{ flex: 1 }}>
                   <Text style={styles.settlementUser}>🛵 {sett.profiles?.full_name || 'Desconocido'}</Text>
                   <Text style={styles.settlementOrders}>{sett.orders_count} pedidos liquidados</Text>
-                  <View style={[styles.settlementBadge, { backgroundColor: sett.status === 'approved' ? '#dcfce7' : '#fef3c7' }]}>
-                    <Text style={[styles.settlementBadgeText, { color: sett.status === 'approved' ? '#166534' : '#92400e' }]}>
-                      {sett.status === 'approved' ? '✓ LIQUIDADO' : '⏳ PENDIENTE'}
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 }}>
+                    <View style={[styles.settlementBadge, { backgroundColor: sett.status === 'approved' ? '#dcfce7' : '#fef3c7', marginTop: 0 }]}>
+                      <Text style={[styles.settlementBadgeText, { color: sett.status === 'approved' ? '#166534' : '#92400e' }]}>
+                        {sett.status === 'approved' ? '✓ LIQUIDADO' : '⏳ PENDIENTE'}
+                      </Text>
+                    </View>
+                    <Text style={{ fontSize: 10, color: '#64748b', fontWeight: 'bold' }}>
+                      🗓️ {new Date(sett.created_at).toLocaleDateString()} - 🕒 {new Date(sett.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                     </Text>
                   </View>
+                  {sett.status === 'approved' && (
+                    <Text style={{ color: '#16a34a', fontSize: 10, fontWeight: '800', marginTop: 5 }}>
+                      ✅ Cuadre de caja correcto perfectamente, jornada finalizada y cerrada
+                    </Text>
+                  )}
                 </View>
                 <View style={{ alignItems: 'flex-end' }}>
-                   <Text style={styles.settlementAmount}>${parseFloat(sett.total_amount).toLocaleString()}</Text>
-                   <Text style={{ fontSize: 10, color: '#94a3b8' }}>{new Date(sett.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>
+                  <Text style={styles.settlementAmount}>${parseFloat(sett.total_amount).toLocaleString()}</Text>
                 </View>
               </TouchableOpacity>
             ))}
@@ -859,14 +1189,32 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
               {settlementOrders.map(order => (
                 <View key={order.id} style={styles.settlementOrderCard}>
                   <View style={styles.settlementOrderHeader}>
-                    <Text style={styles.settlementOrderTitle}>{order.customer_name}</Text>
-                    <Text style={styles.settlementOrderPrice}>${parseFloat(order.total).toLocaleString()}</Text>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.settlementOrderTitle}>{order.customer_name}</Text>
+                      {order.status === 'No Recibido' && (
+                        <View style={[styles.settlementBadge, { backgroundColor: '#fee2e2', width: 100, marginTop: 4 }]}>
+                          <Text style={[styles.settlementBadgeText, { color: '#ef4444', fontSize: 9 }]}>📦 DEVOLUCIÓN</Text>
+                        </View>
+                      )}
+                    </View>
+                    <Text style={[styles.settlementOrderPrice, order.status === 'No Recibido' && { color: '#94a3b8', textDecorationLine: 'line-through' }]}>
+                      ${parseFloat(order.total).toLocaleString()}
+                    </Text>
                   </View>
                   <Text style={styles.settlementOrderInfo}>📍 {order.delivery_address}</Text>
-                  <Text style={styles.settlementOrderInfo}>🆔 #ORD-{order.id.substring(0,6).toUpperCase()}</Text>
-                  <Text style={styles.settlementOrderInfo}>🕒 Entregado: {order.delivered_at ? new Date(order.delivered_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--:--'}</Text>
-                  
-                  {order.order_reviews && order.order_reviews.length > 0 && (
+                  <Text style={styles.settlementOrderInfo}>🆔 #ORD-{order.id.substring(0, 6).toUpperCase()}</Text>
+
+                  {order.status === 'No Recibido' ? (
+                    <View style={styles.settlementRejectionBox}>
+                      <Text style={styles.settlementRejectionLabel}>Motivo del Rechazo:</Text>
+                      <Text style={styles.settlementRejectionReason}>"{order.client_rejection_reason || 'No especificado'}"</Text>
+                      <Text style={styles.settlementRejectionDate}>Rechazado: {order.client_rejected_at ? new Date(order.client_rejected_at).toLocaleTimeString() : '--:--'}</Text>
+                    </View>
+                  ) : (
+                    <Text style={styles.settlementOrderInfo}>🕒 Entregado: {order.delivered_at ? new Date(order.delivered_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--:--'}</Text>
+                  )}
+
+                  {order.order_reviews && order.order_reviews.length > 0 && order.status !== 'No Recibido' && (
                     <View style={styles.settlementReviewBox}>
                       <Text style={styles.settlementReviewRating}>⭐ {order.order_reviews[0].rating}/5</Text>
                       <Text style={styles.settlementReviewComment}>"{order.order_reviews[0].comment || 'Sin comentario'}"</Text>
@@ -884,137 +1232,200 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
   const renderSettlementConfirmModal = () => (
     <Modal visible={isSettlementConfirmVisible} animationType="fade" transparent>
       <View style={styles.modalOverlay}>
-         <View style={[styles.modalContent, { minHeight: '40%', padding: 30, borderRadius: 32 }]}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Confirmar Recaudo 💰</Text>
-              <TouchableOpacity onPress={() => setIsSettlementConfirmVisible(false)}>
-                <Text style={{ fontSize: 24 }}>✕</Text>
-              </TouchableOpacity>
-            </View>
+        <View style={[styles.modalContent, { minHeight: '40%', padding: 30, borderRadius: 32 }]}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Confirmar Recaudo 💰</Text>
+            <TouchableOpacity onPress={() => setIsSettlementConfirmVisible(false)}>
+              <Text style={{ fontSize: 24 }}>✕</Text>
+            </TouchableOpacity>
+          </View>
 
-            {confirmingData && (
-              <ScrollView showsVerticalScrollIndicator={false}>
-                <Text style={styles.confirmSubtitle}>¿Has recibido el dinero físico de manos del mensajero?</Text>
-                
-                <View style={styles.confirmDataBox}>
-                  <Text style={styles.confirmLabel}>Mensajero:</Text>
-                  <Text style={styles.confirmValue}>{confirmingData.rep.full_name}</Text>
-                  
-                  <View style={{ height: 15 }} />
-                  
-                  <Text style={styles.confirmLabel}>Monto a Recibir:</Text>
-                  <Text style={styles.confirmAmount}>${confirmingData.stats.recaudado.toLocaleString()}</Text>
+          {confirmingData && (
+            <ScrollView showsVerticalScrollIndicator={false}>
+              <Text style={styles.confirmSubtitle}>¿Has recibido el dinero físico de manos del mensajero?</Text>
+
+              <View style={styles.confirmDataBox}>
+                <Text style={styles.confirmLabel}>Mensajero:</Text>
+                <Text style={styles.confirmValue}>{confirmingData.rep.full_name}</Text>
+
+                <View style={{ height: 15 }} />
+
+                <Text style={styles.confirmLabel}>Monto a Recibir:</Text>
+                <Text style={styles.confirmAmount}>${confirmingData.stats.recaudado.toLocaleString()}</Text>
+              </View>
+
+              {confirmingData.stats.pendientes > 0 && (
+                <View style={[styles.warningNote, { backgroundColor: '#fff1f2', borderColor: '#ef4444' }]}>
+                  <Text style={[styles.warningNoteText, { color: '#991b1b', fontWeight: 'bold' }]}>
+                    ⚠️ ATENCIÓN: El mensajero tiene {confirmingData.stats.pendientes} pedido(s) sin finalizar (Pendiente/Ruta).
+                  </Text>
+                  <Text style={{ fontSize: 10, color: '#ef4444', marginTop: 4 }}>
+                    Al liquidar con el botón de abajo, estos pedidos se RECHAZARÁN automáticamente para cerrar el ciclo.
+                  </Text>
                 </View>
+              )}
 
-                <View style={styles.warningNote}>
-                  <Text style={styles.warningNoteText}>⚠️ Al confirmar, se cerrará la jornada del mensajero y se archivarán los pedidos como "Liquidados".</Text>
-                </View>
+              <View style={styles.warningNote}>
+                <Text style={styles.warningNoteText}>⚠️ Al confirmar, se archivarán los pedidos como "Liquidados" y se cerrará la jornada.</Text>
+              </View>
 
-                <View style={[styles.modalBtns, { marginTop: 30 }]}>
-                   <TouchableOpacity 
-                    style={[styles.modalBtn, styles.cancelBtn]} 
-                    onPress={() => setIsSettlementConfirmVisible(false)}
-                   >
-                     <Text style={styles.modalBtnText}>No, después</Text>
-                   </TouchableOpacity>
+              <View style={[styles.modalBtns, { marginTop: 30 }]}>
+                <TouchableOpacity
+                  style={[styles.modalBtn, styles.cancelBtn]}
+                  onPress={() => setIsSettlementConfirmVisible(false)}
+                >
+                  <Text style={styles.modalBtnText}>No, después</Text>
+                </TouchableOpacity>
 
-                   <TouchableOpacity 
-                    style={[styles.modalBtn, { backgroundColor: '#166534' }]} 
-                    onPress={async () => {
-                      try {
-                        setClosingJornada(true);
-                        const { data: sett } = await (supabase as any)
-                          .from('shift_settlements')
-                          .select('id')
-                          .eq('messenger_id', confirmingData.rep.id)
-                          .eq('status', 'pending')
-                          .single();
+                <TouchableOpacity
+                  style={[styles.modalBtn, { backgroundColor: confirmingData.stats.pendientes > 0 ? '#ef4444' : '#166534' }]}
+                  onPress={async () => {
+                    try {
+                      setClosingJornada(true);
+                      const { data: sett } = await (supabase as any)
+                        .from('shift_settlements')
+                        .select('id')
+                        .eq('messenger_id', confirmingData.rep.id)
+                        .eq('status', 'pending')
+                        .single();
 
-                        if (sett) {
-                          const { data: res } = await (supabase.rpc as any)('approve_shift_closure', { p_settlement_id: sett.id });
-                          if (res?.success) {
-                            setIsSettlementConfirmVisible(false);
-                            Alert.alert("¡Éxito! ✅", "Jornada liquidada y dinero registrado correctamente.");
-                            fetchData();
-                          } else {
-                            Alert.alert("Error", res?.error || "Error al liquidar");
-                          }
-                        } else {
-                          Alert.alert("Error", "No se encontró una solicitud pendiente para este mensajero.");
+                      if (sett) {
+                        // --- LÓGICA DE LIMPIEZA v7.7 ---
+                        if (confirmingData.stats.pendientes > 0) {
+                          const incompleteStatuses = ['Pendiente', 'Preparando', 'Enviado'];
+                          await supabase
+                            .from('orders')
+                            .update({ 
+                              status: 'No Recibido', 
+                              client_rejection_reason: 'Rechazo Administrativo: Cierre de Jornada',
+                              client_rejected_at: new Date().toISOString()
+                            })
+                            .eq('repartidor_id', confirmingData.rep.id)
+                            .in('status', incompleteStatuses)
+                            .eq('is_settled', false);
                         }
-                      } catch (e: any) {
-                        Alert.alert("Error", e.message);
-                      } finally {
-                        setClosingJornada(false);
+
+                        const { data: res } = await (supabase.rpc as any)('approve_shift_closure', { p_settlement_id: sett.id });
+                        if (res?.success) {
+                          setIsSettlementConfirmVisible(false);
+                          Alert.alert("¡Éxito! ✅", "Jornada liquidada y ciclo de pedidos cerrado.");
+                          fetchData();
+                        } else {
+                          Alert.alert("Error", res?.error || "Error al liquidar");
+                        }
+                      } else {
+                        Alert.alert("Error", "No se encontró una solicitud pendiente.");
                       }
-                    }}
-                   >
-                     {closingJornada ? (
-                       <ActivityIndicator color="#fff" />
-                     ) : (
-                       <Text style={{ color: '#fff', fontWeight: 'bold' }}>Sí, Recibido ✅</Text>
-                     )}
-                   </TouchableOpacity>
-                </View>
-              </ScrollView>
-            )}
-         </View>
+                    } catch (e: any) {
+                      Alert.alert("Error", e.message);
+                    } finally {
+                      setClosingJornada(false);
+                    }
+                  }}
+                >
+                  {closingJornada ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <Text style={{ color: '#fff', fontWeight: 'bold' }}>
+                      {confirmingData.stats.pendientes > 0 ? '⚠️ RECHAZAR Y CERRAR' : 'SÍ, RECIBIDO ✅'}
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
+          )}
+        </View>
       </View>
     </Modal>
   );
 
-  const renderOrders = () => (
-    <View style={styles.tabContent}>
-      <Text style={styles.sectionTitle}>Órdenes Recientes</Text>
-      {orders.length === 0 ? (
-        <Text style={styles.emptyText}>Aún no hay ventas registradas.</Text>
-      ) : (
-        orders.map(order => (
-          <View key={order.id} style={styles.orderCard}>
-            <View style={styles.orderHead}>
-              <View style={styles.orderActionsHeader}>
-                <Text style={styles.orderId}>#ORD-{order.id.substring(0, 6).toUpperCase()}</Text>
-                <TouchableOpacity onPress={() => openOrderDetails(order)} style={styles.detailsBtn}>
-                  <Text style={styles.detailsBtnText}>👁️ Ver Detalle</Text>
-                </TouchableOpacity>
-              </View>
-              <Text style={[styles.statusBadge, 
-                order.status === 'Pendiente' ? styles.statusPending :
-                order.status === 'Recibida' ? styles.statusReceived : 
-                order.status === 'Preparación' ? styles.statusPreparing :
-                order.status === 'Enviado' ? styles.statusShipped : 
-                order.status === 'Cancelado' ? { backgroundColor: '#fee2e2', color: '#ef4444' } : styles.statusDone]}>
-                {order.status === 'Cancelado' ? 'No Disponible ✕' : order.status}
-              </Text>
-            </View>
-            <View style={styles.orderBody}>
-              <Text style={styles.orderCustomer}>👥 Cliente: {order.customer_name || 'N/A'}</Text>
-              <View style={styles.deliveryInfoRow}>
-                <Text style={styles.deliveryLabel}>📍 Entrega:</Text>
-                <Text style={styles.deliveryText}>{order.delivery_address}, {order.neighborhood}</Text>
-              </View>
-              <Text style={styles.deliveryPhone}>📞 {order.phone_number}</Text>
-              <Text style={styles.orderTotal}>💰 Total: ${parseFloat(order.total).toLocaleString()}</Text>
-              <Text style={styles.orderDate}>⏰ {new Date(order.created_at).toLocaleString()}</Text>
+  const renderOrders = () => {
+    const rejectedOrders = orders.filter(o => o.status === 'No Recibido');
+    const otherOrders = orders.filter(o => o.status !== 'No Recibido');
 
-              {order.status === 'Entregado' && order.order_reviews && order.order_reviews.length > 0 && (
-                <View style={styles.reviewSummaryBlock}>
-                   <Text style={styles.reviewSummaryTitle}>Reseña del Cliente ⭐</Text>
-                   <Text style={styles.reviewSummaryStars}>{'⭐'.repeat(order.order_reviews[0].rating)}</Text>
-                   <Text style={styles.reviewSummaryText}>"{order.order_reviews[0].comment || 'Sin comentario'}"</Text>
+    return (
+      <View style={styles.tabContent}>
+        {rejectedOrders.length > 0 && (
+          <>
+            <Text style={[styles.sectionTitle, { color: '#ef4444' }]}>⚠️ Pedidos No Recibidos ({rejectedOrders.length})</Text>
+            {rejectedOrders.map(order => (
+              <View key={order.id} style={[styles.orderCard, { borderColor: '#fecaca', borderLeftWidth: 6, borderLeftColor: '#ef4444' }]}>
+                <View style={styles.orderHead}>
+                  <View style={styles.orderActionsHeader}>
+                    <Text style={[styles.orderId, { color: '#ef4444' }]}>#ORD-{order.id.substring(0, 6).toUpperCase()}</Text>
+                    <TouchableOpacity onPress={() => openOrderDetails(order)} style={styles.detailsBtn}>
+                      <Text style={styles.detailsBtnText}>👁️ Ver Detalles</Text>
+                    </TouchableOpacity>
+                  </View>
+                  <View style={[styles.statusBadge, { backgroundColor: '#fee2e2' }]}>
+                    <Text style={{ color: '#ef4444', fontWeight: '800', fontSize: 10 }}>NO RECIBIDO ✕</Text>
+                  </View>
                 </View>
-              )}
-            </View>
-            <View style={styles.statusActions}>
-               <Text style={styles.actionTitle}>Cambiar Estado:</Text>
-               <View style={styles.actionRow}>
+                <View style={styles.rejectionDetailBox}>
+                  <Text style={styles.rejectionLabel}>Motivo del Rechazo:</Text>
+                  <Text style={styles.rejectionReason}>"{order.client_rejection_reason || 'No especificó motivo'}"</Text>
+                  <Text style={styles.rejectionDate}>Rechazado el: {new Date(order.client_rejected_at).toLocaleString()}</Text>
+                </View>
+                <View style={styles.orderBody}>
+                  <Text style={styles.orderCustomer}>👥 Cliente: {order.customer_name}</Text>
+                  <Text style={styles.orderTotal}>💰 Reclamación por: ${parseFloat(order.total).toLocaleString()}</Text>
+                </View>
+              </View>
+            ))}
+            <View style={{ height: 1, backgroundColor: '#f1f5f9', marginVertical: 20 }} />
+          </>
+        )}
+
+        <Text style={styles.sectionTitle}>Órdenes Recientes</Text>
+        {otherOrders.length === 0 && rejectedOrders.length === 0 ? (
+          <Text style={styles.emptyText}>Aún no hay ventas registradas.</Text>
+        ) : (
+          otherOrders.map(order => (
+            <View key={order.id} style={styles.orderCard}>
+              <View style={styles.orderHead}>
+                <View style={styles.orderActionsHeader}>
+                  <Text style={styles.orderId}>#ORD-{order.id.substring(0, 6).toUpperCase()}</Text>
+                  <TouchableOpacity onPress={() => openOrderDetails(order)} style={styles.detailsBtn}>
+                    <Text style={styles.detailsBtnText}>👁️ Ver Detalle</Text>
+                  </TouchableOpacity>
+                </View>
+                <Text style={[styles.statusBadge,
+                order.status === 'Pendiente' ? styles.statusPending :
+                  order.status === 'Recibida' ? styles.statusReceived :
+                    order.status === 'Preparación' ? styles.statusPreparing :
+                      order.status === 'Enviado' ? styles.statusShipped :
+                        order.status === 'Cancelado' ? { backgroundColor: '#fee2e2', color: '#ef4444' } : styles.statusDone]}>
+                  {order.status === 'Cancelado' ? 'No Disponible ✕' : order.status}
+                </Text>
+              </View>
+              <View style={styles.orderBody}>
+                <Text style={styles.orderCustomer}>👥 Cliente: {order.customer_name || 'N/A'}</Text>
+                <View style={styles.deliveryInfoRow}>
+                  <Text style={styles.deliveryLabel}>📍 Entrega:</Text>
+                  <Text style={styles.deliveryText}>{order.delivery_address}, {order.neighborhood}</Text>
+                </View>
+                <Text style={styles.deliveryPhone}>📞 {order.phone_number}</Text>
+                <Text style={styles.orderTotal}>💰 Total: ${parseFloat(order.total).toLocaleString()}</Text>
+                <Text style={styles.orderDate}>⏰ {new Date(order.created_at).toLocaleString()}</Text>
+
+                {order.status === 'Entregado' && order.order_reviews && order.order_reviews.length > 0 && (
+                  <View style={styles.reviewSummaryBlock}>
+                    <Text style={styles.reviewSummaryTitle}>Reseña del Cliente ⭐</Text>
+                    <Text style={styles.reviewSummaryStars}>{'⭐'.repeat(order.order_reviews[0].rating)}</Text>
+                    <Text style={styles.reviewSummaryText}>"{order.order_reviews[0].comment || 'Sin comentario'}"</Text>
+                  </View>
+                )}
+              </View>
+              <View style={styles.statusActions}>
+                <Text style={styles.actionTitle}>Cambiar Estado:</Text>
+                <View style={styles.actionRow}>
                   {['Preparación', 'Enviado'].map(st => {
-                    const isPassed = (order.status === 'Enviado' && st === 'Preparación') || 
-                                    order.status === 'Entregado' || 
-                                    order.status === 'Confirmado' ||
-                                    order.status === 'Cancelado';
+                    const isPassed = (order.status === 'Enviado' && st === 'Preparación') ||
+                      order.status === 'Entregado' ||
+                      order.status === 'Confirmado' ||
+                      order.status === 'Cancelado';
                     return (
-                      <TouchableOpacity key={st} 
+                      <TouchableOpacity key={st}
                         onPress={() => !isPassed && updateOrderStatus(order.id, st)}
                         style={[styles.smallStatusBtn, order.status === st && styles.btnActive, isPassed && styles.btnDisabled]}>
                         <Text style={[styles.smallStatusText, order.status === st && styles.textWhite, isPassed && styles.textDisabled]}>{st}</Text>
@@ -1023,21 +1434,22 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
                   })}
                   {(order.status === 'Entregado' || order.status === 'Confirmado') && (
                     <View style={[styles.smallStatusBtn, styles.btnActive, { backgroundColor: '#16a34a', borderColor: '#16a34a' }]}>
-                       <Text style={styles.textWhite}>✅ {order.status}</Text>
+                      <Text style={styles.textWhite}>✅ {order.status}</Text>
                     </View>
                   )}
                   {order.status === 'Cancelado' && (
                     <View style={[styles.smallStatusBtn, { backgroundColor: '#ef4444', borderColor: '#ef4444' }]}>
-                       <Text style={styles.textWhite}>No Disponible ✕</Text>
+                      <Text style={styles.textWhite}>No Disponible ✕</Text>
                     </View>
                   )}
-               </View>
+                </View>
+              </View>
             </View>
-          </View>
-        ))
-      )}
-    </View>
-  );
+          ))
+        )}
+      </View>
+    );
+  };
 
   const renderChecklistModal = () => (
     <Modal visible={isChecklistModalVisible} animationType="slide" transparent>
@@ -1057,9 +1469,9 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
                   </Text>
                   <Text style={styles.qtyLabel}>Solicitado: {item.quantity}</Text>
                 </View>
-                
+
                 <View style={styles.qtySelector}>
-                  <TouchableOpacity 
+                  <TouchableOpacity
                     style={[styles.qtyBtn, item.fulfilled_quantity === 0 && styles.qtyBtnDisabled]}
                     onPress={() => {
                       if (item.fulfilled_quantity > 0) {
@@ -1071,14 +1483,14 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
                   >
                     <Text style={styles.qtyBtnText}>-</Text>
                   </TouchableOpacity>
-                  
+
                   <View style={styles.qtyValueContainer}>
                     <Text style={[styles.qtyValue, item.fulfilled_quantity < item.quantity && { color: '#ef4444' }]}>
                       {item.fulfilled_quantity}
                     </Text>
                   </View>
 
-                  <TouchableOpacity 
+                  <TouchableOpacity
                     style={[styles.qtyBtn, item.fulfilled_quantity >= item.quantity && styles.qtyBtnDisabled]}
                     onPress={() => {
                       if (item.fulfilled_quantity < item.quantity) {
@@ -1091,7 +1503,7 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
                     <Text style={styles.qtyBtnText}>+</Text>
                   </TouchableOpacity>
                 </View>
-                
+
                 {item.fulfilled_quantity === item.quantity && (
                   <View style={styles.fullCheck}>
                     <Text style={{ color: '#16a34a', fontWeight: 'bold' }}>✓</Text>
@@ -1140,58 +1552,67 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
         <TouchableOpacity onPress={onBack} style={styles.backBtn}><Text style={styles.backText}>← Salir del Panel</Text></TouchableOpacity>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1, justifyContent: 'center' }}>
           <View style={[
-            styles.rtIndicator, 
+            styles.rtIndicator,
             { backgroundColor: realTimeStatus === 'connected' ? '#22c55e' : realTimeStatus === 'error' ? '#ef4444' : '#f59e0b' }
           ]} />
           <Text style={styles.headerTitle}>Admin Panel 💎</Text>
         </View>
         <View style={styles.headerRight}>
-           <TouchableOpacity style={styles.shopBtn} onPress={onViewShop}>
-             <Text style={styles.shopBtnText}>🛒 Ver Tienda</Text>
-           </TouchableOpacity>
-           <TouchableOpacity 
-             style={styles.notifBell} 
-             onPress={() => {
-               if (onResetAdminUnread) onResetAdminUnread();
-               setNotifModalVisible(true);
-             }}
-           >
-             <Text style={{ fontSize: 24 }}>{adminUnreadCount > 0 ? '🔔' : '🔔'}</Text>
-             {adminUnreadCount > 0 ? (
-               <View style={styles.notifBadge}>
-                 <Text style={styles.notifBadgeTextShort}>{adminUnreadCount > 9 ? '+9' : adminUnreadCount}</Text>
-               </View>
-             ) : pendingOrders.length > 0 ? (
-               <View style={styles.notifBadge}>
-                 <Text style={styles.notifBadgeTextShort}>{pendingOrders.length > 9 ? '+9' : pendingOrders.length}</Text>
-               </View>
-             ) : null}
-           </TouchableOpacity>
+          <TouchableOpacity style={styles.shopBtn} onPress={onViewShop}>
+            <Text style={styles.shopBtnText}>🛒 Ver Tienda</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.notifBell}
+            onPress={() => {
+              if (onResetAdminUnread) onResetAdminUnread();
+              setNotifModalVisible(true);
+            }}
+          >
+            <Text style={{ fontSize: 24 }}>{adminUnreadCount > 0 ? '🔔' : '🔔'}</Text>
+            {adminUnreadCount > 0 ? (
+              <View style={styles.notifBadge}>
+                <Text style={styles.notifBadgeTextShort}>{adminUnreadCount > 9 ? '+9' : adminUnreadCount}</Text>
+              </View>
+            ) : pendingOrders.length > 0 ? (
+              <View style={styles.notifBadge}>
+                <Text style={styles.notifBadgeTextShort}>{pendingOrders.length > 9 ? '+9' : pendingOrders.length}</Text>
+              </View>
+            ) : null}
+          </TouchableOpacity>
         </View>
       </View>
-      <View style={styles.tabs}>
+      <ScrollView 
+        horizontal 
+        showsHorizontalScrollIndicator={false} 
+        style={styles.tabsScroll}
+        contentContainerStyle={styles.tabsContentContainer}
+      >
         {[
-          { id: 'inventory', label: '📦 Stock' },
-          { id: 'sales', label: '📊 Ventas' },
-           { id: 'orders', label: '🧾 Pedidos' },
-           { id: 'repartidores', label: '🛵 Flota' },
-           { id: 'settlements', label: '📑 Liquid.' },
-           { id: 'categories', label: '🏷️ Tipos' }
+          { id: 'inventory', label: 'Stock' },
+          { id: 'sales', label: 'Ventas' },
+          { id: 'orders', label: 'Pedidos' },
+          { id: 'repartidores', label: 'Flota' },
+          { id: 'settlements', label: 'Liquid.' },
+          { id: 'categories', label: 'Tipos' }
         ].map((tab: any) => (
-          <TouchableOpacity key={tab.id} style={[styles.tab, activeTab === tab.id && styles.activeTab]} onPress={() => setActiveTab(tab.id)}>
+          <TouchableOpacity 
+            key={tab.id} 
+            style={[styles.tab, activeTab === tab.id && styles.activeTab]} 
+            onPress={() => setActiveTab(tab.id)}
+          >
             <Text style={[styles.tabText, activeTab === tab.id && styles.activeTabText]}>
               {tab.label}
             </Text>
           </TouchableOpacity>
         ))}
-      </View>
+      </ScrollView>
       <ScrollView style={styles.content}>
         {activeTab === 'inventory' ? renderInventory() : null}
         {activeTab === 'sales' ? renderSales() : null}
-         {activeTab === 'orders' ? renderOrders() : null}
-         {activeTab === 'repartidores' ? renderRepartidores() : null}
-         {activeTab === 'categories' ? renderCategories() : null}
-         {activeTab === 'settlements' ? renderSettlements() : null}
+        {activeTab === 'orders' ? renderOrders() : null}
+        {activeTab === 'repartidores' ? renderRepartidores() : null}
+        {activeTab === 'categories' ? renderCategories() : null}
+        {activeTab === 'settlements' ? renderSettlements() : null}
       </ScrollView>
 
       {/* MODAL PARA PRODUCTO */}
@@ -1235,74 +1656,74 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
       {/* MODAL NOTIFICACIONES */}
       <Modal visible={notifModalVisible} animationType="fade" transparent>
         <View style={styles.modalOverlay}>
-           <View style={[styles.modalContent, { minHeight: '60%' }]}>
-              <View style={styles.modalHeader}><Text style={styles.modalTitle}>Pedidos Nuevos 🔔</Text><TouchableOpacity onPress={() => setNotifModalVisible(false)}><Text style={{ fontSize: 24 }}>✕</Text></TouchableOpacity></View>
-              <ScrollView style={{ flex: 1 }}>
-                 {pendingOrders.map(order => (
-                    <View key={order.id} style={styles.notifItem}>
-                       <View style={{ flex: 1, marginRight: 10 }}>
-                          <Text style={styles.notifId}>#ORD-{order.id.substring(0, 6).toUpperCase()}</Text>
-                          <Text style={styles.notifCustomer}>{order.customer_name}</Text>
-                          <Text style={styles.notifAddress} numberOfLines={1}>📍 {order.delivery_address}</Text>
-                          <Text style={styles.atenderBtnText}>Total: ${parseFloat(order.total).toLocaleString()}</Text>
-                       </View>
-                       <View style={{ gap: 8 }}>
-                          <TouchableOpacity 
-                            style={styles.atenderBtn} 
-                            onPress={() => { 
-                              updateOrderStatus(order.id, 'Recibida'); 
-                              if (pendingOrders.length === 1) {
-                                setNotifModalVisible(false);
-                              }
-                            }}
-                          >
-                             <Text style={styles.atenderBtnText}>Atender ✅</Text>
-                          </TouchableOpacity>
-                          <TouchableOpacity 
-                             style={[styles.atenderBtn, { backgroundColor: '#ef4444' }]} 
-                             onPress={() => {
-                               const performReject = async () => {
-                                 // 1. ACTUALIZACIÓN OPTIMISTA ⚡ (Inyección inmediata)
-                                 const updatedPending = pendingOrders.filter(p => p.id !== order.id);
-                                 setPendingOrders(updatedPending);
-                                 setOrders(prev => prev.filter(o => o.id !== order.id));
-                                 
-                                 // 2. Lógica de cierre corregida
-                                 if (updatedPending.length === 0) {
-                                   setNotifModalVisible(false);
-                                 }
-                                 
-                                 // 3. Ejecución en segundo plano
-                                 try { 
-                                   await updateOrderStatus(order.id, 'Cancelado'); 
-                                 } catch (e) { 
-                                   console.error('Error background reject:', e); 
-                                 }
-                               };
+          <View style={[styles.modalContent, { minHeight: '60%' }]}>
+            <View style={styles.modalHeader}><Text style={styles.modalTitle}>Pedidos Nuevos 🔔</Text><TouchableOpacity onPress={() => setNotifModalVisible(false)}><Text style={{ fontSize: 24 }}>✕</Text></TouchableOpacity></View>
+            <ScrollView style={{ flex: 1 }}>
+              {pendingOrders.map(order => (
+                <View key={order.id} style={styles.notifItem}>
+                  <View style={{ flex: 1, marginRight: 10 }}>
+                    <Text style={styles.notifId}>#ORD-{order.id.substring(0, 6).toUpperCase()}</Text>
+                    <Text style={styles.notifCustomer}>{order.customer_name}</Text>
+                    <Text style={styles.notifAddress} numberOfLines={1}>📍 {order.delivery_address}</Text>
+                    <Text style={styles.atenderBtnText}>Total: ${parseFloat(order.total).toLocaleString()}</Text>
+                  </View>
+                  <View style={{ gap: 8 }}>
+                    <TouchableOpacity
+                      style={styles.atenderBtn}
+                      onPress={() => {
+                        updateOrderStatus(order.id, 'Recibida');
+                        if (pendingOrders.length === 1) {
+                          setNotifModalVisible(false);
+                        }
+                      }}
+                    >
+                      <Text style={styles.atenderBtnText}>Atender ✅</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.atenderBtn, { backgroundColor: '#ef4444' }]}
+                      onPress={() => {
+                        const performReject = async () => {
+                          // 1. ACTUALIZACIÓN OPTIMISTA ⚡ (Inyección inmediata)
+                          const updatedPending = pendingOrders.filter(p => p.id !== order.id);
+                          setPendingOrders(updatedPending);
+                          setOrders(prev => prev.filter(o => o.id !== order.id));
 
-                               if (Platform.OS === 'web') {
-                                 if (window.confirm(`¿Rechazar pedido #ORD-${order.id.substring(0,6).toUpperCase()}?`)) {
-                                   performReject();
-                                 }
-                               } else {
-                                 Alert.alert(
-                                   "Rechazar Pedido",
-                                   "¿Estás seguro de que deseas rechazar este pedido?",
-                                   [
-                                     { text: "No", style: "cancel" },
-                                     { text: "Sí", style: "destructive", onPress: performReject }
-                                   ]
-                                 );
-                               }
-                             }}
-                           >
-                              <Text style={styles.atenderBtnText}>Rechazar ✕</Text>
-                           </TouchableOpacity>
-                       </View>
-                    </View>
-                 ))}
-              </ScrollView>
-           </View>
+                          // 2. Lógica de cierre corregida
+                          if (updatedPending.length === 0) {
+                            setNotifModalVisible(false);
+                          }
+
+                          // 3. Ejecución en segundo plano
+                          try {
+                            await updateOrderStatus(order.id, 'Cancelado');
+                          } catch (e) {
+                            console.error('Error background reject:', e);
+                          }
+                        };
+
+                        if (Platform.OS === 'web') {
+                          if (window.confirm(`¿Rechazar pedido #ORD-${order.id.substring(0, 6).toUpperCase()}?`)) {
+                            performReject();
+                          }
+                        } else {
+                          Alert.alert(
+                            "Rechazar Pedido",
+                            "¿Estás seguro de que deseas rechazar este pedido?",
+                            [
+                              { text: "No", style: "cancel" },
+                              { text: "Sí", style: "destructive", onPress: performReject }
+                            ]
+                          );
+                        }
+                      }}
+                    >
+                      <Text style={styles.atenderBtnText}>Rechazar ✕</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ))}
+            </ScrollView>
+          </View>
         </View>
       </Modal>
 
@@ -1332,13 +1753,13 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
               <TouchableOpacity onPress={() => setIsRepPickerVisible(false)}><Text style={{ fontSize: 24 }}>✕</Text></TouchableOpacity>
             </View>
             <Text style={styles.modalSubtitle}>Selecciona quién llevará el pedido al cliente:</Text>
-            
+
             <ScrollView style={{ flex: 1 }}>
               {repartidores.length === 0 ? (
-                 <Text style={styles.emptyText}>No tienes repartidores registrados.</Text>
+                <Text style={styles.emptyText}>No tienes repartidores registrados.</Text>
               ) : repartidores.map(rep => (
-                <TouchableOpacity 
-                  key={rep.id} 
+                <TouchableOpacity
+                  key={rep.id}
                   style={[styles.repPickerItem, selectedRepId === rep.id && styles.repPickerItemActive]}
                   onPress={() => setSelectedRepId(rep.id)}
                 >
@@ -1352,8 +1773,8 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
               ))}
             </ScrollView>
 
-            <TouchableOpacity 
-              style={[styles.saveButton, !selectedRepId && { opacity: 0.5 }]} 
+            <TouchableOpacity
+              style={[styles.saveButton, !selectedRepId && { opacity: 0.5 }]}
               disabled={!selectedRepId}
               onPress={() => {
                 setIsRepPickerVisible(false);
@@ -1381,60 +1802,60 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
             {viewingOrder && (
               <ScrollView showsVerticalScrollIndicator={false}>
                 <View style={styles.detailHeaderBlock}>
-                    <Text style={styles.detailOrderId}>#{viewingOrder.id.substring(0, 8).toUpperCase()}</Text>
-                    <Text style={[styles.statusBadge, 
-                        viewingOrder.status === 'Pendiente' ? styles.statusPending :
-                        viewingOrder.status === 'Recibida' ? styles.statusReceived : 
-                        viewingOrder.status === 'Preparación' ? styles.statusPreparing :
+                  <Text style={styles.detailOrderId}>#{viewingOrder.id.substring(0, 8).toUpperCase()}</Text>
+                  <Text style={[styles.statusBadge,
+                  viewingOrder.status === 'Pendiente' ? styles.statusPending :
+                    viewingOrder.status === 'Recibida' ? styles.statusReceived :
+                      viewingOrder.status === 'Preparación' ? styles.statusPreparing :
                         viewingOrder.status === 'Enviado' ? styles.statusShipped : styles.statusDone]}>
-                        {viewingOrder.status}
-                    </Text>
+                    {viewingOrder.status}
+                  </Text>
                 </View>
 
                 <Text style={styles.detailSectionTitle}>🕒 Auditoría de Tiempos</Text>
                 <View style={styles.timelineContainer}>
-                    <View style={styles.timelineItem}><Text>📅 Solicitado:</Text><Text style={styles.timelineVal}>{new Date(viewingOrder.created_at).toLocaleString()}</Text></View>
-                    {viewingOrder.prepared_at && <View style={styles.timelineItem}><Text>🥣 Preparado:</Text><Text style={styles.timelineVal}>{new Date(viewingOrder.prepared_at).toLocaleString()}</Text></View>}
-                    {viewingOrder.shipped_at && <View style={styles.timelineItem}><Text>🚀 Enviado:</Text><Text style={styles.timelineVal}>{new Date(viewingOrder.shipped_at).toLocaleString()}</Text></View>}
-                    {viewingOrder.delivered_at && <View style={styles.timelineItem}><Text>📦 Entregado:</Text><Text style={styles.timelineVal}>{new Date(viewingOrder.delivered_at).toLocaleString()}</Text></View>}
-                    {viewingOrder.client_confirmed_at && <View style={styles.timelineItem}><Text>✅ Confirmado:</Text><Text style={styles.timelineVal}>{new Date(viewingOrder.client_confirmed_at).toLocaleString()}</Text></View>}
+                  <View style={styles.timelineItem}><Text>📅 Solicitado:</Text><Text style={styles.timelineVal}>{new Date(viewingOrder.created_at).toLocaleString()}</Text></View>
+                  {viewingOrder.prepared_at && <View style={styles.timelineItem}><Text>🥣 Preparado:</Text><Text style={styles.timelineVal}>{new Date(viewingOrder.prepared_at).toLocaleString()}</Text></View>}
+                  {viewingOrder.shipped_at && <View style={styles.timelineItem}><Text>🚀 Enviado:</Text><Text style={styles.timelineVal}>{new Date(viewingOrder.shipped_at).toLocaleString()}</Text></View>}
+                  {viewingOrder.delivered_at && <View style={styles.timelineItem}><Text>📦 Entregado:</Text><Text style={styles.timelineVal}>{new Date(viewingOrder.delivered_at).toLocaleString()}</Text></View>}
+                  {viewingOrder.client_confirmed_at && <View style={styles.timelineItem}><Text>✅ Confirmado:</Text><Text style={styles.timelineVal}>{new Date(viewingOrder.client_confirmed_at).toLocaleString()}</Text></View>}
                 </View>
 
                 <Text style={styles.detailSectionTitle}>🛒 Productos (Pedido vs Enviado)</Text>
                 <View style={styles.itemsTable}>
-                    <View style={styles.tableHeader}>
-                        <Text style={[styles.tableCol, { flex: 2 }]}>Producto</Text>
-                        <Text style={styles.tableCol}>Ped.</Text>
-                        <Text style={styles.tableCol}>Env.</Text>
+                  <View style={styles.tableHeader}>
+                    <Text style={[styles.tableCol, { flex: 2 }]}>Producto</Text>
+                    <Text style={styles.tableCol}>Ped.</Text>
+                    <Text style={styles.tableCol}>Env.</Text>
+                  </View>
+                  {viewingOrderItems.map(item => (
+                    <View key={item.id} style={styles.tableRow}>
+                      <Text style={[styles.tableCol, { flex: 2 }]}>{item.products?.name || 'Producto'}</Text>
+                      <Text style={styles.tableCol}>{item.quantity}</Text>
+                      <Text style={[styles.tableCol, item.fulfilled_quantity < item.quantity && { color: '#ef4444', fontWeight: 'bold' }]}>
+                        {item.fulfilled_quantity ?? '--'}
+                      </Text>
                     </View>
-                    {viewingOrderItems.map(item => (
-                        <View key={item.id} style={styles.tableRow}>
-                            <Text style={[styles.tableCol, { flex: 2 }]}>{item.products?.name || 'Producto'}</Text>
-                            <Text style={styles.tableCol}>{item.quantity}</Text>
-                            <Text style={[styles.tableCol, item.fulfilled_quantity < item.quantity && { color: '#ef4444', fontWeight: 'bold' }]}>
-                                {item.fulfilled_quantity ?? '--'}
-                            </Text>
-                        </View>
-                    ))}
+                  ))}
                 </View>
 
                 <Text style={styles.detailSectionTitle}>🛵 Logística</Text>
                 <View style={styles.logisticBox}>
-                    <Text style={styles.logisticLabel}>Repartidor Asignado:</Text>
-                    <Text style={styles.logisticVal}>{viewingOrder.repartidor?.full_name || 'No asignado'}</Text>
-                    <Text style={styles.logisticEmail}>{viewingOrder.repartidor?.email || '--'}</Text>
-                    {viewingOrder.repartidor?.phone && (
-                      <Text style={styles.logisticPhone}>📞 {viewingOrder.repartidor.phone}</Text>
-                    )}
+                  <Text style={styles.logisticLabel}>Repartidor Asignado:</Text>
+                  <Text style={styles.logisticVal}>{viewingOrder.repartidor?.full_name || 'No asignado'}</Text>
+                  <Text style={styles.logisticEmail}>{viewingOrder.repartidor?.email || '--'}</Text>
+                  {viewingOrder.repartidor?.phone && (
+                    <Text style={styles.logisticPhone}>📞 {viewingOrder.repartidor.phone}</Text>
+                  )}
                 </View>
 
                 {viewingOrder.notes && (
-                    <View style={styles.notesBox}>
-                        <Text style={styles.notesLabel}>Novedades de preparación:</Text>
-                        <Text style={styles.notesText}>{viewingOrder.notes}</Text>
-                    </View>
+                  <View style={styles.notesBox}>
+                    <Text style={styles.notesLabel}>Novedades de preparación:</Text>
+                    <Text style={styles.notesText}>{viewingOrder.notes}</Text>
+                  </View>
                 )}
-                
+
                 <View style={{ height: 40 }} />
               </ScrollView>
             )}
@@ -1454,45 +1875,45 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
               <View style={styles.form}>
                 <Text style={styles.label}>Nombre Completo</Text>
                 <TextInput style={styles.input} placeholder="Nombre del trabajador" value={repName} onChangeText={setRepName} />
-                
+
                 <Text style={styles.label}>Teléfono de Contacto</Text>
                 <View style={{ flexDirection: 'row', gap: 10 }}>
-                  <TextInput 
-                    style={[styles.input, { width: 80 }]} 
-                    placeholder="+57" 
-                    value={repCountryCode} 
-                    onChangeText={setRepCountryCode} 
-                    keyboardType="phone-pad" 
+                  <TextInput
+                    style={[styles.input, { width: 80 }]}
+                    placeholder="+57"
+                    value={repCountryCode}
+                    onChangeText={setRepCountryCode}
+                    keyboardType="phone-pad"
                   />
-                  <TextInput 
-                    style={[styles.input, { flex: 1 }]} 
-                    placeholder="3101234567" 
-                    value={repPhone} 
-                    onChangeText={setRepPhone} 
-                    keyboardType="phone-pad" 
+                  <TextInput
+                    style={[styles.input, { flex: 1 }]}
+                    placeholder="3101234567"
+                    value={repPhone}
+                    onChangeText={setRepPhone}
+                    keyboardType="phone-pad"
                   />
                 </View>
 
                 <Text style={styles.label}>Nombre de Usuario (Login)</Text>
-                <TextInput 
-                  style={[styles.input, (editingRepId && repEmail) ? { backgroundColor: '#e2e8f0', color: '#64748b' } : {}]} 
-                  placeholder="ej: carlos123" 
-                  value={repEmail} 
-                  onChangeText={setRepEmail} 
-                  autoCapitalize="none" 
+                <TextInput
+                  style={[styles.input, (editingRepId && repEmail) ? { backgroundColor: '#e2e8f0', color: '#64748b' } : {}]}
+                  placeholder="ej: carlos123"
+                  value={repEmail}
+                  onChangeText={setRepEmail}
+                  autoCapitalize="none"
                   editable={!editingRepId || !repEmail}
                 />
-                
+
                 <Text style={styles.label}>
                   {editingRepId ? 'Nueva Contraseña (Opcional)' : 'Contraseña Temporal'}
                 </Text>
                 <View style={styles.passwordContainer}>
-                  <TextInput 
-                    style={[styles.input, { flex: 1, borderWidth: 0, marginBottom: 0 }]} 
-                    placeholder={editingRepId ? "Dejar vacío para no cambiar" : "Asigna una clave (mín. 6)"} 
-                    value={repPassword} 
-                    onChangeText={setRepPassword} 
-                    secureTextEntry={!showRepPassword} 
+                  <TextInput
+                    style={[styles.input, { flex: 1, borderWidth: 0, marginBottom: 0 }]}
+                    placeholder={editingRepId ? "Dejar vacío para no cambiar" : "Asigna una clave (mín. 6)"}
+                    value={repPassword}
+                    onChangeText={setRepPassword}
+                    secureTextEntry={!showRepPassword}
                   />
                   <TouchableOpacity onPress={() => setShowRepPassword(!showRepPassword)} style={styles.eyeBtn}>
                     <Text style={styles.eyeText}>{showRepPassword ? '🙈' : '👁️'}</Text>
@@ -1512,54 +1933,90 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#f8fafc', paddingTop: Platform.OS === 'ios' ? 60 : 40 },
-  header: { padding: 15, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#e2e8f0' },
-  headerTitle: { fontSize: 16, fontWeight: '800', color: '#0f172a', flex: 1, textAlign: 'center' },
-  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  backBtn: { padding: 5, width: 80 },
-  backText: { color: '#ef4444', fontWeight: '600', fontSize: 12 },
-  shopBtn: { backgroundColor: '#f1f5f9', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, borderWidth: 1, borderColor: '#e2e8f0' },
-  shopBtnText: { color: '#0f172a', fontWeight: '700', fontSize: 11 },
-  tabs: { flexDirection: 'row', backgroundColor: '#fff', padding: 10 },
-  tab: { flex: 1, paddingVertical: 12, alignItems: 'center', borderRadius: 12 },
-  activeTab: { backgroundColor: '#0f172a' },
-  tabText: { color: '#64748b', fontWeight: '600' },
+  container: { flex: 1, backgroundColor: '#f8fafc', paddingTop: Platform.OS === 'ios' ? 20 : 10 },
+  header: { padding: 10, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#f1f5f9' },
+  headerTitle: { fontSize: 13, fontWeight: '900', color: '#0f172a', flex: 1, textAlign: 'center', textTransform: 'uppercase', letterSpacing: 0.5 },
+  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  backBtn: { padding: 4, width: 70 },
+  backText: { color: '#ef4444', fontWeight: '700', fontSize: 11 },
+  shopBtn: { backgroundColor: '#f1f5f9', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: '#e2e8f0' },
+  shopBtnText: { color: '#0f172a', fontWeight: '800', fontSize: 10 },
+  tabsScroll: { backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#f1f5f9', maxHeight: 42, minHeight: 42 },
+  tabsContentContainer: { paddingHorizontal: 12, alignItems: 'center' },
+  tab: { paddingHorizontal: 12, paddingVertical: 6, alignItems: 'center', borderRadius: 20, marginRight: 6, backgroundColor: '#f8fafc', borderWidth: 1, borderColor: '#f1f5f9' },
+  activeTab: { backgroundColor: '#0f172a', borderColor: '#0f172a' },
+  tabText: { color: '#64748b', fontWeight: '800', fontSize: 11, textTransform: 'uppercase' },
   activeTabText: { color: '#fff' },
+  filterScroll: { marginBottom: 12 },
+  filterChip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, backgroundColor: '#f1f5f9', marginRight: 8, borderWidth: 1, borderColor: '#e2e8f0' },
+  filterChipActive: { backgroundColor: '#0f172a', borderColor: '#0f172a' },
+  filterText: { color: '#64748b', fontWeight: 'bold', fontSize: 11 },
+  filterTextActive: { color: '#fff' },
+  customDateBox: { marginBottom: 12, backgroundColor: '#f8fafc', padding: 10, borderRadius: 14, borderWidth: 1, borderColor: '#e2e8f0' },
+  repStatContainer: { marginTop: 8 },
   content: { flex: 1 },
-  tabContent: { padding: 20 },
-  sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
-  sectionTitle: { fontSize: 22, fontWeight: '800', color: '#0f172a' },
-  addButton: { backgroundColor: '#16a34a', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8 },
-  addButtonText: { color: '#fff', fontWeight: 'bold' },
-  itemCard: { backgroundColor: '#fff', padding: 16, borderRadius: 16, marginBottom: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderWidth: 1, borderColor: '#e2e8f0' },
-  itemName: { fontSize: 16, fontWeight: '700', color: '#0f172a' },
-  itemStock: { color: '#64748b', fontSize: 14, marginTop: 4 },
-  itemPrice: { fontSize: 16, fontWeight: '800', color: '#16a34a' },
-  orderCard: { backgroundColor: '#fff', padding: 16, borderRadius: 16, marginBottom: 12, borderLeftWidth: 4, borderLeftColor: '#0f172a' },
-  orderHead: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
-  orderBody: { paddingVertical: 8 },
-  orderId: { fontWeight: 'bold', color: '#0f172a' },
-  statusBadge: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, fontSize: 12, fontWeight: 'bold', overflow: 'hidden' },
+  tabContent: { padding: 16 },
+  sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
+  sectionTitle: { fontSize: 18, fontWeight: '900', color: '#0f172a', letterSpacing: -0.5 },
+  addButton: { backgroundColor: '#16a34a', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 6 },
+  addButtonText: { color: '#fff', fontWeight: 'bold', fontSize: 13 },
+  itemCard: { backgroundColor: '#fff', padding: 12, borderRadius: 14, marginBottom: 10, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderWidth: 1, borderColor: '#f1f5f9' },
+  itemName: { fontSize: 15, fontWeight: '700', color: '#0f172a' },
+  itemStock: { color: '#64748b', fontSize: 13, marginTop: 2 },
+  itemPrice: { fontSize: 15, fontWeight: '800', color: '#16a34a' },
+  orderCard: { backgroundColor: '#fff', padding: 12, borderRadius: 14, marginBottom: 10, borderLeftWidth: 3, borderLeftColor: '#0f172a' },
+  orderHead: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
+  orderBody: { paddingVertical: 6 },
+  orderId: { fontWeight: 'bold', color: '#0f172a', fontSize: 14 },
+  statusBadge: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, fontSize: 10, fontWeight: 'bold', overflow: 'hidden' },
+  // ... rest stay the same for brevity or I can skip them if not requested
+  statusShipped: { backgroundColor: '#e0e7ff', color: '#4338ca' },
   statusDone: { backgroundColor: '#dcfce7', color: '#16a34a' },
-  statusReceived: { backgroundColor: '#dcfce7', color: '#16a34a' },
+  rejectionDetailBox: {
+    backgroundColor: '#fff1f2',
+    padding: 10,
+    borderRadius: 10,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#fecaca',
+  },
+  rejectionLabel: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#ef4444',
+    textTransform: 'uppercase',
+    marginBottom: 2,
+  },
+  rejectionReason: {
+    fontSize: 13,
+    color: '#7f1d1d',
+    fontStyle: 'italic',
+    lineHeight: 16,
+  },
+  rejectionDate: {
+    fontSize: 9,
+    color: '#991b1b',
+    marginTop: 6,
+    fontWeight: '600',
+  },
   statusPending: { backgroundColor: '#e2e8f0', color: '#64748b' },
   statusPreparing: { backgroundColor: '#fef3c7', color: '#d97706' },
-  statusShipped: { backgroundColor: '#e0e7ff', color: '#4338ca' },
-  orderCustomer: { color: '#64748b', marginBottom: 4, fontSize: 13 },
-  orderDate: { color: '#94a3b8', fontSize: 12, marginTop: 4 },
-  orderTotal: { fontWeight: '700', fontSize: 15, color: '#16a34a', marginTop: 4 },
-  statusActions: { marginTop: 15, paddingTop: 15, borderTopWidth: 1, borderTopColor: '#f1f5f9' },
-  actionTitle: { fontSize: 12, fontWeight: '700', color: '#64748b', marginBottom: 8 },
-  actionRow: { flexDirection: 'row', gap: 8 },
-  smallStatusBtn: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: '#f1f5f9', borderWidth: 1, borderColor: '#e2e8f0' },
+  statusReceived: { backgroundColor: '#dcfce7', color: '#16a34a' },
+  orderCustomer: { color: '#64748b', marginBottom: 2, fontSize: 12 },
+  orderDate: { color: '#94a3b8', fontSize: 11, marginTop: 2 },
+  orderTotal: { fontWeight: '700', fontSize: 14, color: '#16a34a', marginTop: 2 },
+  statusActions: { marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: '#f1f5f9' },
+  actionTitle: { fontSize: 11, fontWeight: '700', color: '#64748b', marginBottom: 6 },
+  actionRow: { flexDirection: 'row', gap: 6 },
+  smallStatusBtn: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, backgroundColor: '#f1f5f9', borderWidth: 1, borderColor: '#e2e8f0' },
   btnActive: { backgroundColor: '#0f172a', borderColor: '#0f172a' },
-  smallStatusText: { fontSize: 11, fontWeight: '600', color: '#64748b' },
+  smallStatusText: { fontSize: 10, fontWeight: '600', color: '#64748b' },
   textWhite: { color: '#fff' },
-  statsRow: { flexDirection: 'row', gap: 12 },
-  statBox: { flex: 1, backgroundColor: '#fff', padding: 20, borderRadius: 20, borderWidth: 1, borderColor: '#e2e8f0' },
-  statLabel: { color: '#64748b', fontSize: 14, marginBottom: 8 },
-  statValue: { fontSize: 24, fontWeight: '900', color: '#0f172a' },
-  mockChart: { height: 160, backgroundColor: '#f1f5f9', borderRadius: 20, justifyContent: 'center', alignItems: 'center', marginTop: 16 },
+  statsRow: { flexDirection: 'row', gap: 10 },
+  statBox: { flex: 1, backgroundColor: '#fff', padding: 16, borderRadius: 16, borderWidth: 1, borderColor: '#e2e8f0' },
+  statLabel: { color: '#64748b', fontSize: 12, marginBottom: 4 },
+  statValue: { fontSize: 20, fontWeight: '900', color: '#0f172a' },
+  mockChart: { height: 140, backgroundColor: '#f1f5f9', borderRadius: 16, justifyContent: 'center', alignItems: 'center', marginTop: 12 },
   emptyText: { textAlign: 'center', marginTop: 40, color: '#94a3b8' },
   itemMainInfo: { flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1 },
   checkItemRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 15, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' },
@@ -1611,7 +2068,11 @@ const styles = StyleSheet.create({
   settlementOrderInfo: { fontSize: 12, color: '#64748b' },
   settlementReviewBox: { padding: 12, backgroundColor: '#f8fafc', borderRadius: 12, marginTop: 12, borderLeftWidth: 4, borderLeftColor: '#fbbf24' },
   settlementReviewRating: { fontSize: 13, fontWeight: 'bold', color: '#fbbf24' },
-  settlementReviewComment: { fontSize: 13, fontStyle: 'italic', color: '#475569', marginTop: 4 },
+  settlementReviewComment: { fontSize: 13, color: '#475569', fontStyle: 'italic', marginTop: 4 },
+  settlementRejectionBox: { backgroundColor: '#fff1f2', padding: 12, borderRadius: 12, marginTop: 10, borderWidth: 1, borderColor: '#fecaca' },
+  settlementRejectionLabel: { fontSize: 10, fontWeight: '800', color: '#ef4444', textTransform: 'uppercase', marginBottom: 2 },
+  settlementRejectionReason: { fontSize: 13, color: '#991b1b', fontStyle: 'italic' },
+  settlementRejectionDate: { fontSize: 10, color: '#991b1b', marginTop: 6, opacity: 0.8 },
   checkItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' },
   checkbox: { width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: '#e2e8f0', marginRight: 12, justifyContent: 'center', alignItems: 'center' },
   checkboxChecked: { backgroundColor: '#16a34a', borderColor: '#16a34a' },

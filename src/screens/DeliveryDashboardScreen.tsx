@@ -413,16 +413,23 @@ export default function DeliveryDashboardScreen({ onLogout }: { onLogout: () => 
       </View>
 
       <View style={styles.listSection}>
-        <ScrollView refreshControl={<RefreshControl refreshing={refreshing} onRefresh={fetchDeliveryData} colors={["#16a34a"]} />}>
-          {orders.filter(o => {
+        <FlatList
+          data={orders.filter(o => {
             if (activeTab === 'in_route') return o.status === 'Enviado';
             if (activeTab === 'delivered') return DELIVERED_STATUSES.includes(o.status);
             if (activeTab === 'rejected') return o.status === 'No Recibido';
             return false;
-          }).map(order => (
-            <View key={order.id}>{renderOrderItem({ item: order })}</View>
-          ))}
-        </ScrollView>
+          })}
+          keyExtractor={(item: any) => item.id}
+          initialNumToRender={5}
+          maxToRenderPerBatch={8}
+          windowSize={5}
+          removeClippedSubviews={true}
+          refreshing={refreshing}
+          onRefresh={fetchDeliveryData}
+          renderItem={({ item }: { item: any }) => renderOrderItem({ item })}
+          contentContainerStyle={{ paddingBottom: 40 }}
+        />
       </View>
 
       {renderEndOfDayModal()}

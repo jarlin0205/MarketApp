@@ -226,6 +226,11 @@ export default function LandingScreen({ onNavigate }: { onNavigate: (screen: str
                   <Text style={styles.adminLinkText}>Acceso Repartidor 🛵</Text>
                 </TouchableOpacity>
               </View>
+
+              <View style={styles.signatureContainer}>
+                <Text style={styles.signatureText}>Creada y diseñada por <Text style={styles.signatureName}>Jarlin Esquivel</Text></Text>
+              </View>
+
             </View>
           </View>
         </View>
@@ -406,6 +411,9 @@ const styles = StyleSheet.create({
   adminLinkText: { color: '#94a3b8', fontSize: 13, fontWeight: '600', textDecorationLine: 'underline' },
   staffAccessRow: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 5, marginTop: 10 },
   dividerDots: { width: 4, height: 4, borderRadius: 2, backgroundColor: '#475569', marginHorizontal: 4 },
+  signatureContainer: { marginTop: 40, alignItems: 'center', opacity: 0.5 },
+  signatureText: { color: '#94a3b8', fontSize: 11, fontStyle: 'italic', letterSpacing: 0.5 },
+  signatureName: { fontWeight: 'bold', color: '#e2e8f0' },
 
   // MODAL STYLES
   modalOverlay: { flex: 1, backgroundColor: 'rgba(15, 23, 42, 0.8)', justifyContent: 'center' },

@@ -12,11 +12,12 @@ import {
   Modal,
   ActivityIndicator,
   Alert,
-  KeyboardAvoidingView,
-  Dimensions
+  Dimensions,
+  KeyboardAvoidingView
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { PieChart } from 'react-native-chart-kit';
+import { FlashList } from '@shopify/flash-list';
 import { supabase } from '../lib/supabase';
 import { createClient } from '@supabase/supabase-js';
 import { useAuthStore } from '../store/useAuthStore';
@@ -607,46 +608,59 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
   };
 
   const renderInventory = () => (
-    <View style={styles.tabContent}>
+    <View style={[styles.tabContent, { flex: 1, paddingBottom: 0 }]}>
       <View style={styles.sectionHeader}>
         <Text style={styles.sectionTitle}>Mi Inventario</Text>
         <TouchableOpacity style={styles.addButton} onPress={() => openForm()}>
           <Text style={styles.addButtonText}>+ Nuevo</Text>
         </TouchableOpacity>
       </View>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.catScrollAdmin}>
-        {['Todas', ...categories.map(c => c.name)].map(cat => (
-          <TouchableOpacity key={cat} onPress={() => setSelectedInventoryCategory(cat)}
-            style={[styles.catPillSmall, selectedInventoryCategory === cat && styles.catPillSmallActive]}>
-            <Text style={[styles.catTextSmall, selectedInventoryCategory === cat && styles.catTextActive]}>{cat}</Text>
-          </TouchableOpacity>
-        ))}
-      </ScrollView>
-      {loading ? (
-        <ActivityIndicator color="#16a34a" size="large" style={{ marginTop: 40 }} />
-      ) : inventory.length === 0 ? (
-        <Text style={styles.emptyText}>No hay productos registrados.</Text>
-      ) : (
-        inventory.filter(item => selectedInventoryCategory === 'Todas' || item.category === selectedInventoryCategory).map((item) => (
-          <View key={item.id} style={styles.itemCard}>
-            <View style={styles.itemMainInfo}>
-              <Image source={{ uri: item.image_url }} style={styles.smallImage} />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.itemName} numberOfLines={2}>{item.name}</Text>
-                <Text style={styles.itemCategory}>{item.category || 'Sin categoría'}</Text>
-                <Text style={styles.itemStock}>Stock: {item.stock}</Text>
+      <View style={{ marginBottom: 10 }}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.catScrollAdmin}>
+          {['Todas', ...categories.map(c => c.name)].map(cat => (
+            <TouchableOpacity key={cat} onPress={() => setSelectedInventoryCategory(cat)}
+              style={[styles.catPillSmall, selectedInventoryCategory === cat && styles.catPillSmallActive]}>
+              <Text style={[styles.catTextSmall, selectedInventoryCategory === cat && styles.catTextActive]}>{cat}</Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      </View>
+      <View style={{ flex: 1 }}>
+        {loading ? (
+          <ActivityIndicator color="#16a34a" size="large" style={{ marginTop: 40 }} />
+        ) : inventory.length === 0 ? (
+          <Text style={styles.emptyText}>No hay productos registrados.</Text>
+        ) : (
+          <FlatList
+            data={inventory.filter(item => selectedInventoryCategory === 'Todas' || item.category === selectedInventoryCategory)}
+            keyExtractor={(item: any) => item.id}
+            initialNumToRender={8}
+            maxToRenderPerBatch={10}
+            windowSize={5}
+            removeClippedSubviews={true}
+            renderItem={({ item }: { item: any }) => (
+              <View style={styles.itemCard}>
+                <View style={styles.itemMainInfo}>
+                  <Image source={{ uri: item.image_url }} style={styles.smallImage} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.itemName} numberOfLines={2}>{item.name}</Text>
+                    <Text style={styles.itemCategory}>{item.category || 'Sin categoría'}</Text>
+                    <Text style={styles.itemStock}>Stock: {item.stock}</Text>
+                  </View>
+                </View>
+                <View style={styles.itemActions}>
+                  <Text style={styles.itemPrice}>${parseFloat(item.price).toLocaleString()}</Text>
+                  <View style={styles.actionBtns}>
+                    <TouchableOpacity onPress={() => openForm(item)} style={styles.actionBtn}><Text style={{ fontSize: 16 }}>✏️</Text></TouchableOpacity>
+                    <TouchableOpacity onPress={() => handleDelete(item.id)} style={styles.actionBtn}><Text style={{ fontSize: 16 }}>🗑️</Text></TouchableOpacity>
+                  </View>
+                </View>
               </View>
-            </View>
-            <View style={styles.itemActions}>
-              <Text style={styles.itemPrice}>${parseFloat(item.price).toLocaleString()}</Text>
-              <View style={styles.actionBtns}>
-                <TouchableOpacity onPress={() => openForm(item)} style={styles.actionBtn}><Text style={{ fontSize: 16 }}>✏️</Text></TouchableOpacity>
-                <TouchableOpacity onPress={() => handleDelete(item.id)} style={styles.actionBtn}><Text style={{ fontSize: 16 }}>🗑️</Text></TouchableOpacity>
-              </View>
-            </View>
-          </View>
-        ))
-      )}
+            )}
+            contentContainerStyle={{ paddingBottom: 20 }}
+          />
+        )}
+      </View>
     </View>
   );
 
@@ -1606,14 +1620,14 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
           </TouchableOpacity>
         ))}
       </ScrollView>
-      <ScrollView style={styles.content}>
+      <View style={styles.content}>
         {activeTab === 'inventory' ? renderInventory() : null}
-        {activeTab === 'sales' ? renderSales() : null}
-        {activeTab === 'orders' ? renderOrders() : null}
+        {activeTab === 'sales' ? <ScrollView showsVerticalScrollIndicator={false}>{renderSales()}</ScrollView> : null}
+        {activeTab === 'orders' ? <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>{renderOrders()}</ScrollView> : null}
         {activeTab === 'repartidores' ? renderRepartidores() : null}
-        {activeTab === 'categories' ? renderCategories() : null}
-        {activeTab === 'settlements' ? renderSettlements() : null}
-      </ScrollView>
+        {activeTab === 'categories' ? <ScrollView showsVerticalScrollIndicator={false}>{renderCategories()}</ScrollView> : null}
+        {activeTab === 'settlements' ? <ScrollView showsVerticalScrollIndicator={false}>{renderSettlements()}</ScrollView> : null}
+      </View>
 
       {/* MODAL PARA PRODUCTO */}
       <Modal visible={modalVisible} animationType="slide" transparent>

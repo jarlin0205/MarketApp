@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { View, Text, ScrollView, Image, TouchableOpacity, StyleSheet, StatusBar, Platform, ActivityIndicator, Alert, Modal, TextInput } from 'react-native';
+import React, { useState, useRef } from 'react';
+import { View, Text, ScrollView, Image, TouchableOpacity, StyleSheet, StatusBar, Platform, ActivityIndicator, Alert, Modal, TextInput, KeyboardAvoidingView } from 'react-native';
 import { useCartStore } from '../store/useCartStore';
 import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/useAuthStore';
@@ -33,6 +33,11 @@ export default function CartScreen({ onBack, onOrderSuccess }: CartScreenProps) 
   const [neighborhood, setNeighborhood] = useState('');
   const [phoneNumber, setPhoneNumber] = useState('');
   const [selectedCountry, setSelectedCountry] = useState(COUNTRIES[0]);
+
+  // Refs para mover el foco entre campos automáticamente
+  const addressRef = useRef<TextInput>(null);
+  const neighborhoodRef = useRef<TextInput>(null);
+  const phoneRef = useRef<TextInput>(null);
 
   const handleOpenDelivery = () => {
     if (!user) return Alert.alert("Inicio de Sesión Requerido", "Debes iniciar sesión para realizar una compra.");
@@ -157,66 +162,90 @@ export default function CartScreen({ onBack, onOrderSuccess }: CartScreenProps) 
       ) : null}
 
       {/* MODAL 1: FORMULARIO DE ENTREGA */}
-      <Modal visible={isDeliveryModalVisible} animationType="slide" transparent>
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { maxHeight: '90%' }]}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Datos de Entrega 🚚</Text>
-              <TouchableOpacity onPress={() => setIsDeliveryModalVisible(false)} style={styles.closeBtn}>
-                <Text style={{ fontSize: 20 }}>✕</Text>
-              </TouchableOpacity>
-            </View>
-            
-            <ScrollView showsVerticalScrollIndicator={false}>
-              <Text style={styles.formLabel}>Nombre de quien recibe</Text>
-              <TextInput 
-                style={styles.formInput} 
-                placeholder="Ej: Juan Pérez" 
-                value={customerName} 
-                onChangeText={setCustomerName} 
-              />
-
-              <Text style={styles.formLabel}>Dirección de la casa</Text>
-              <TextInput 
-                style={styles.formInput} 
-                placeholder="Calle 123 #45-67" 
-                value={address} 
-                onChangeText={setAddress} 
-              />
-
-              <Text style={styles.formLabel}>Barrio</Text>
-              <TextInput 
-                style={styles.formInput} 
-                placeholder="Ej: El Poblado" 
-                value={neighborhood} 
-                onChangeText={setNeighborhood} 
-              />
-
-              <Text style={styles.formLabel}>Teléfono de contacto (WhatsApp)</Text>
-              <View style={styles.phoneInputRow}>
-                <TouchableOpacity 
-                  style={styles.countrySelector} 
-                  onPress={() => setIsCountryModalVisible(true)}
-                >
-                  <Text style={styles.countryFlag}>{selectedCountry.flag}</Text>
-                  <Text style={styles.countryCode}>{selectedCountry.code}</Text>
-                  <Text style={{ fontSize: 10, color: '#64748b' }}>▼</Text>
+      <Modal visible={isDeliveryModalVisible} animationType="slide" transparent statusBarTranslucent>
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalContent, { maxHeight: '92%' }]}>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>Datos de Entrega 🚚</Text>
+                <TouchableOpacity onPress={() => setIsDeliveryModalVisible(false)} style={styles.closeBtn}>
+                  <Text style={{ fontSize: 20 }}>✕</Text>
                 </TouchableOpacity>
-                <TextInput 
-                  style={[styles.formInput, { flex: 1, marginTop: 0 }]} 
-                  placeholder="300 123 4567" 
-                  value={phoneNumber} 
-                  onChangeText={setPhoneNumber} 
-                  keyboardType="numeric"
-                />
               </View>
+              
+              <ScrollView
+                showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
+                contentContainerStyle={{ paddingBottom: 20 }}
+              >
+                <Text style={styles.formLabel}>Nombre de quien recibe</Text>
+                <TextInput 
+                  style={styles.formInput} 
+                  placeholder="Ej: Juan Pérez" 
+                  value={customerName} 
+                  onChangeText={setCustomerName}
+                  returnKeyType="next"
+                  onSubmitEditing={() => addressRef.current?.focus()}
+                  blurOnSubmit={false}
+                />
 
-              <TouchableOpacity style={[styles.checkoutBtn, { marginTop: 30 }]} onPress={handleProceedToConfirmation}>
-                <Text style={styles.checkoutBtnText}>Continuar →</Text>
-              </TouchableOpacity>
-            </ScrollView>
+                <Text style={styles.formLabel}>Dirección de la casa</Text>
+                <TextInput 
+                  ref={addressRef}
+                  style={styles.formInput} 
+                  placeholder="Calle 123 #45-67" 
+                  value={address} 
+                  onChangeText={setAddress}
+                  returnKeyType="next"
+                  onSubmitEditing={() => neighborhoodRef.current?.focus()}
+                  blurOnSubmit={false}
+                />
+
+                <Text style={styles.formLabel}>Barrio</Text>
+                <TextInput 
+                  ref={neighborhoodRef}
+                  style={styles.formInput} 
+                  placeholder="Ej: El Poblado" 
+                  value={neighborhood} 
+                  onChangeText={setNeighborhood}
+                  returnKeyType="next"
+                  onSubmitEditing={() => phoneRef.current?.focus()}
+                  blurOnSubmit={false}
+                />
+
+                <Text style={styles.formLabel}>Teléfono de contacto (WhatsApp)</Text>
+                <View style={styles.phoneInputRow}>
+                  <TouchableOpacity 
+                    style={styles.countrySelector} 
+                    onPress={() => setIsCountryModalVisible(true)}
+                  >
+                    <Text style={styles.countryFlag}>{selectedCountry.flag}</Text>
+                    <Text style={styles.countryCode}>{selectedCountry.code}</Text>
+                    <Text style={{ fontSize: 10, color: '#64748b' }}>▼</Text>
+                  </TouchableOpacity>
+                  <TextInput 
+                    ref={phoneRef}
+                    style={[styles.formInput, { flex: 1, marginTop: 0 }]} 
+                    placeholder="300 123 4567" 
+                    value={phoneNumber} 
+                    onChangeText={setPhoneNumber} 
+                    keyboardType="numeric"
+                    returnKeyType="done"
+                    onSubmitEditing={handleProceedToConfirmation}
+                  />
+                </View>
+
+                <TouchableOpacity style={[styles.checkoutBtn, { marginTop: 30 }]} onPress={handleProceedToConfirmation}>
+                  <Text style={styles.checkoutBtnText}>Continuar →</Text>
+                </TouchableOpacity>
+              </ScrollView>
+            </View>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* MODAL 2: CONFIRMACIÓN FINAL */}

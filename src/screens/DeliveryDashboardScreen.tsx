@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/useAuthStore';
+import * as SecureStore from 'expo-secure-store';
 
 export default function DeliveryDashboardScreen({ onLogout }: { onLogout: () => void }) {
   const user = useAuthStore(state => state.user);
@@ -242,9 +243,17 @@ export default function DeliveryDashboardScreen({ onLogout }: { onLogout: () => 
             <View style={styles.eodNote}><Text style={styles.eodNoteText}>📋 Presenta este resumen al entregar el dinero.</Text></View>
           </ScrollView>
           <TouchableOpacity
-            style={[styles.confirmEodBtn, (stats.delivered === 0 && stats.rejected === 0) && { opacity: 0.5 }]}
-            disabled={(stats.delivered === 0 && stats.rejected === 0)}
+            style={[
+              styles.confirmEodBtn,
+              (stats.delivered === 0 && stats.rejected === 0) && { opacity: 0.5 },
+              shiftStatus === 'pending_closure' && { backgroundColor: '#f59e0b' }
+            ]}
+            disabled={(stats.delivered === 0 && stats.rejected === 0) || shiftStatus === 'pending_closure'}
             onPress={async () => {
+              if (shiftStatus === 'pending_closure') {
+                Alert.alert('⏳ Solicitud Pendiente', 'Ya existe una solicitud de cierre enviada. Espera a que el administrador la valide antes de enviar otra.');
+                return;
+              }
               try {
                 setLoading(true);
                 const { data: rpcRes, error: rpcErr } = await (supabase.rpc as any)('request_shift_closure', {
@@ -254,14 +263,16 @@ export default function DeliveryDashboardScreen({ onLogout }: { onLogout: () => 
                 });
                 if (rpcErr) throw rpcErr;
                 if (rpcRes?.success) {
-                  Alert.alert("✅ Solicitud Enviada", "Entregue el dinero al administrador.");
+                  Alert.alert("✅ Solicitud Enviada", "Entregue el dinero al administrador. No podrás pedir otro cierre hasta que valide este.");
                   setShowEndOfDayModal(false);
                   fetchDeliveryData();
                 }
               } catch (e: any) { Alert.alert("Error", e.message); } finally { setLoading(false); }
             }}
           >
-            <Text style={styles.confirmEodText}>{shiftStatus === 'active' ? 'SOLICITAR CIERRE 🛵' : 'ESPERANDO VALIDACIÓN... ⏳'}</Text>
+            <Text style={styles.confirmEodText}>
+              {shiftStatus === 'pending_closure' ? '🔒 ESPERANDO VALIDACIÓN DEL ADMIN...' : 'SOLICITAR CIERRE 🛵'}
+            </Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -342,7 +353,15 @@ export default function DeliveryDashboardScreen({ onLogout }: { onLogout: () => 
       )}
 
       {item.status === 'Enviado' && (
-        <TouchableOpacity style={styles.deliverBtn} onPress={() => openDeliveryConfirm(item)}><Text style={styles.deliverBtnText}>ENTREGAR ✅</Text></TouchableOpacity>
+        shiftStatus === 'pending_closure' ? (
+          <View style={[styles.deliverBtn, { backgroundColor: '#94a3b8' }]}>
+            <Text style={styles.deliverBtnText}>🔒 BLOQUEADO — Jornada en cierre</Text>
+          </View>
+        ) : (
+          <TouchableOpacity style={styles.deliverBtn} onPress={() => openDeliveryConfirm(item)}>
+            <Text style={styles.deliverBtnText}>ENTREGAR ✅</Text>
+          </TouchableOpacity>
+        )
       )}
     </View>
   );
@@ -380,7 +399,30 @@ export default function DeliveryDashboardScreen({ onLogout }: { onLogout: () => 
           <Text style={styles.welcomeText}>Hola, {user?.full_name || 'Repartidor'} 👋</Text>
           <TouchableOpacity onPress={fetchHistory}><Text style={{ color: '#fbbf24', fontSize: 12, fontWeight: 'bold' }}>📜 VER HISTORIAL</Text></TouchableOpacity>
         </View>
-        <TouchableOpacity style={styles.logoutBtn} onPress={onLogout}><Text style={styles.logoutText}>Salir</Text></TouchableOpacity>
+        <TouchableOpacity 
+          style={styles.logoutBtn} 
+          onPress={async () => {
+            // Confirmar cierre de sesión
+            Alert.alert(
+              'Cerrar Sesión',
+              '¿Estás seguro que deseas salir? Tendrás que volver a ingresar con tu usuario y contraseña.',
+              [
+                { text: 'Cancelar', style: 'cancel' },
+                { 
+                  text: 'Sí, Salir', 
+                  style: 'destructive',
+                  onPress: async () => {
+                    // Limpiar sesión guardada del SecureStore
+                    await SecureStore.deleteItemAsync('repartidor_session');
+                    onLogout();
+                  }
+                }
+              ]
+            );
+          }}
+        >
+          <Text style={styles.logoutText}>Salir</Text>
+        </TouchableOpacity>
       </View>
 
       <View style={styles.statsContainer}>
@@ -401,9 +443,24 @@ export default function DeliveryDashboardScreen({ onLogout }: { onLogout: () => 
         </View>
       </View>
 
-      <TouchableOpacity style={styles.endOfDayBtn} onPress={() => setShowEndOfDayModal(true)}>
-        <Text style={styles.endOfDayEmoji}>🌙</Text>
-        <Text style={styles.endOfDayText}>{shiftStatus === 'pending_closure' ? 'PENDIENTE DE VALIDACIÓN' : 'FINALIZAR JORNADA'}</Text>
+      <TouchableOpacity
+        style={[styles.endOfDayBtn, shiftStatus === 'pending_closure' && { borderColor: '#ef4444', backgroundColor: '#1c0a0a' }]}
+        onPress={() => {
+          if (shiftStatus === 'pending_closure') {
+            Alert.alert(
+              '🔒 Jornada Bloqueada',
+              'Tu solicitud de cierre está siendo revisada por el administrador.\n\nNo puedes realizar más entregas hasta que sea validada.',
+              [{ text: 'Entendido' }]
+            );
+          } else {
+            setShowEndOfDayModal(true);
+          }
+        }}
+      >
+        <Text style={styles.endOfDayEmoji}>{shiftStatus === 'pending_closure' ? '🔒' : '🌙'}</Text>
+        <Text style={[styles.endOfDayText, shiftStatus === 'pending_closure' && { color: '#ef4444' }]}>
+          {shiftStatus === 'pending_closure' ? 'JORNADA BLOQUEADA — ESPERANDO ADMIN' : 'FINALIZAR JORNADA'}
+        </Text>
       </TouchableOpacity>
 
       <View style={styles.tabContainer}>

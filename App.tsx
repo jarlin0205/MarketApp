@@ -12,10 +12,10 @@ import OrderStatusScreen from './src/screens/OrderStatusScreen';
 import MyOrdersScreen from './src/screens/MyOrdersScreen';
 import DeliveryDashboardScreen from './src/screens/DeliveryDashboardScreen';
 
-
 import { supabase } from './src/lib/supabase';
 import { useAuthStore } from './src/store/useAuthStore';
 import { Audio } from 'expo-av';
+import * as SecureStore from 'expo-secure-store';
 
 export default function App() {
   const [currentScreen, setCurrentScreen] = useState('Landing');
@@ -23,6 +23,67 @@ export default function App() {
   const [lastOrderId, setLastOrderId] = useState<string | null>(null);
   const { user } = useAuthStore();
   const role = useAuthStore(state => state.role);
+  const setUser = useAuthStore(state => state.setUser);
+  const [sessionRestored, setSessionRestored] = useState(false);
+
+  // 🔄 RESTAURAR SESIÓN AL ABRIR LA APP
+  useEffect(() => {
+    const restoreSession = async () => {
+      // 1. Intentar restaurar sesión de Supabase Auth (Admin/Cliente)
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session?.user) {
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('id', session.user.id)
+          .single();
+        if (profile) {
+          const userRole = profile.role === 'admin' ? 'admin' : 'client';
+          setUser({ ...session.user, ...profile }, userRole);
+          setCurrentScreen(userRole === 'admin' ? 'AdminDashboard' : 'Home');
+          setSessionRestored(true);
+          return;
+        }
+      }
+
+      // 2. Intentar restaurar sesión de Repartidor (SecureStore)
+      try {
+        const savedSession = await SecureStore.getItemAsync('repartidor_session');
+        if (savedSession) {
+          const { userData, savedRole, savedPassword } = JSON.parse(savedSession);
+          // Verificar que el repartidor sigue activo en BD
+          const { data: profile } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('id', userData.id)
+            .single();
+          if (profile && profile.role === 'repartidor') {
+            setUser({ ...userData, ...profile }, 'repartidor', savedPassword);
+            setCurrentScreen('DeliveryDashboard');
+          } else {
+            // Repartidor ya no existe o fue removido, limpiar sesión
+            await SecureStore.deleteItemAsync('repartidor_session');
+          }
+        }
+      } catch (e) {
+        console.log('No hay sesión de repartidor guardada');
+      }
+
+      setSessionRestored(true);
+    };
+
+    restoreSession();
+
+    // Escuchar cambios de sesión de Supabase (login/logout automático)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === 'SIGNED_OUT') {
+        // No deslogueamos automáticamente, solo si el usuario toca "Salir"
+        return;
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
   
   // Estados para la Notificación Global (Cliente)
   const [notifVisible, setNotifVisible] = useState(false);

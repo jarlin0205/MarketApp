@@ -229,10 +229,8 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
     // Carga inicial
     fetchData();
 
-    // Sistema de Polling (Respaldo de seguridad cada 30s)
-    const pollInterval = setInterval(() => fetchData(), 30000);
-
     // Suscripción Real-time de Ultra-Baja Latencia 🚀
+    // (No se necesita polling - el WebSocket de Supabase maneja todo en tiempo real)
     const subscription = supabase
       .channel('admin-live-orders-v3')
       .on(
@@ -272,7 +270,6 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
       });
 
     return () => {
-      clearInterval(pollInterval);
       subscription.unsubscribe();
     };
   }, []);
@@ -282,10 +279,49 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
       mediaTypes: ['images'],
       allowsEditing: true,
       aspect: [4, 3],
-      quality: 0.7,
+      quality: 0.6,
     });
-    if (!result.canceled) {
-      setImage(result.assets[0].uri);
+
+    if (!result.canceled && result.assets && result.assets[0].uri) {
+      const asset = result.assets[0];
+      const uri = asset.uri;
+
+      // Previsualización inmediata mientras sube
+      setImage(uri);
+      setSaving(true);
+
+      try {
+        // Leer el archivo como blob (funciona en React Native)
+        const response = await fetch(uri);
+        const blob = await response.blob();
+
+        // Nombre único para el archivo en Supabase Storage
+        const fileExt = uri.split('.').pop()?.toLowerCase() || 'jpg';
+        const fileName = `product_${Date.now()}.${fileExt}`;
+
+        // Subir al bucket 'products' en Supabase Storage
+        const { data: uploadData, error: uploadError } = await supabase.storage
+          .from('products')
+          .upload(fileName, blob, {
+            contentType: `image/${fileExt}`,
+            upsert: true,
+          });
+
+        if (uploadError) throw uploadError;
+
+        // Obtener la URL pública real (funciona en cualquier dispositivo del mundo)
+        const { data: publicUrlData } = supabase.storage
+          .from('products')
+          .getPublicUrl(fileName);
+
+        setImage(publicUrlData.publicUrl);
+        Alert.alert('✅ Imagen subida', 'La foto fue guardada en la nube correctamente.');
+      } catch (err: any) {
+        Alert.alert('Error al subir imagen', err.message);
+        setImage(null);
+      } finally {
+        setSaving(false);
+      }
     }
   };
 
@@ -1296,39 +1332,57 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
                   onPress={async () => {
                     try {
                       setClosingJornada(true);
-                      const { data: sett } = await (supabase as any)
+
+                      // FIX: Buscar TODAS las pendientes y tomar la más reciente
+                      // (evita el error de .single() cuando hay más de una fila)
+                      const { data: allPending, error: queryErr } = await (supabase as any)
                         .from('shift_settlements')
                         .select('id')
                         .eq('messenger_id', confirmingData.rep.id)
                         .eq('status', 'pending')
-                        .single();
+                        .order('created_at', { ascending: false });
 
-                      if (sett) {
-                        // --- LÓGICA DE LIMPIEZA v7.7 ---
-                        if (confirmingData.stats.pendientes > 0) {
-                          const incompleteStatuses = ['Pendiente', 'Preparando', 'Enviado'];
-                          await supabase
-                            .from('orders')
-                            .update({ 
-                              status: 'No Recibido', 
-                              client_rejection_reason: 'Rechazo Administrativo: Cierre de Jornada',
-                              client_rejected_at: new Date().toISOString()
-                            })
-                            .eq('repartidor_id', confirmingData.rep.id)
-                            .in('status', incompleteStatuses)
-                            .eq('is_settled', false);
-                        }
+                      if (queryErr) throw new Error(queryErr.message);
 
-                        const { data: res } = await (supabase.rpc as any)('approve_shift_closure', { p_settlement_id: sett.id });
-                        if (res?.success) {
-                          setIsSettlementConfirmVisible(false);
-                          Alert.alert("¡Éxito! ✅", "Jornada liquidada y ciclo de pedidos cerrado.");
-                          fetchData();
-                        } else {
-                          Alert.alert("Error", res?.error || "Error al liquidar");
-                        }
+                      if (!allPending || allPending.length === 0) {
+                        Alert.alert("Sin solicitud", "El repartidor no tiene solicitudes de cierre pendientes.");
+                        return;
+                      }
+
+                      // La más reciente es el cierre real a aprobar
+                      const sett = allPending[0];
+
+                      // Si había duplicados viejos, marcarlos como aprobados también para limpiar
+                      if (allPending.length > 1) {
+                        const oldIds = allPending.slice(1).map((s: any) => s.id);
+                        await (supabase as any)
+                          .from('shift_settlements')
+                          .update({ status: 'approved', approved_at: new Date().toISOString() })
+                          .in('id', oldIds);
+                      }
+
+                      // --- LÓGICA DE LIMPIEZA v7.7 ---
+                      if (confirmingData.stats.pendientes > 0) {
+                        const incompleteStatuses = ['Pendiente', 'Preparando', 'Enviado'];
+                        await supabase
+                          .from('orders')
+                          .update({ 
+                            status: 'No Recibido', 
+                            client_rejection_reason: 'Rechazo Administrativo: Cierre de Jornada',
+                            client_rejected_at: new Date().toISOString()
+                          })
+                          .eq('repartidor_id', confirmingData.rep.id)
+                          .in('status', incompleteStatuses)
+                          .eq('is_settled', false);
+                      }
+
+                      const { data: res } = await (supabase.rpc as any)('approve_shift_closure', { p_settlement_id: sett.id });
+                      if (res?.success) {
+                        setIsSettlementConfirmVisible(false);
+                        Alert.alert("¡Éxito! ✅", "Jornada liquidada y ciclo de pedidos cerrado.");
+                        fetchData();
                       } else {
-                        Alert.alert("Error", "No se encontró una solicitud pendiente.");
+                        Alert.alert("Error", res?.error || "Error al liquidar");
                       }
                     } catch (e: any) {
                       Alert.alert("Error", e.message);
@@ -1771,20 +1825,41 @@ export default function AdminDashboardScreen({ onBack, onViewShop, adminUnreadCo
             <ScrollView style={{ flex: 1 }}>
               {repartidores.length === 0 ? (
                 <Text style={styles.emptyText}>No tienes repartidores registrados.</Text>
-              ) : repartidores.map(rep => (
+              ) : repartidores.map(rep => {
+                const isLocked = rep.shift_status === 'pending_closure';
+                return (
                 <TouchableOpacity
                   key={rep.id}
-                  style={[styles.repPickerItem, selectedRepId === rep.id && styles.repPickerItemActive]}
-                  onPress={() => setSelectedRepId(rep.id)}
+                  style={[
+                    styles.repPickerItem,
+                    selectedRepId === rep.id && styles.repPickerItemActive,
+                    isLocked && { backgroundColor: '#f1f5f9', opacity: 0.6, borderColor: '#ef4444', borderWidth: 1 }
+                  ]}
+                  onPress={() => {
+                    if (isLocked) {
+                      Alert.alert(
+                        '🔒 Repartidor Bloqueado',
+                        `${rep.full_name || 'Este repartidor'} tiene una solicitud de cierre de jornada pendiente de validación.\n\nNo se le pueden asignar pedidos hasta que el administrador valide su cierre.`
+                      );
+                      return;
+                    }
+                    setSelectedRepId(rep.id);
+                  }}
                 >
                   <View style={{ flex: 1 }}>
-                    <Text style={[styles.repPickerName, selectedRepId === rep.id && styles.textWhite]}>{rep.full_name || 'Sin Nombre'}</Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      {isLocked && <Text style={{ fontSize: 14 }}>🔒</Text>}
+                      <Text style={[styles.repPickerName, selectedRepId === rep.id && styles.textWhite, isLocked && { color: '#ef4444' }]}>
+                        {rep.full_name || 'Sin Nombre'}{isLocked ? ' — EN CIERRE' : ''}
+                      </Text>
+                    </View>
                     {rep.phone && <Text style={[styles.repPickerEmail, selectedRepId === rep.id && styles.textWhite]}>📞 {rep.phone}</Text>}
                     <Text style={[styles.repPickerEmail, selectedRepId === rep.id && styles.textWhite]}>{rep.email}</Text>
                   </View>
                   {selectedRepId === rep.id && <Text style={{ color: '#fff', fontSize: 20 }}>✓</Text>}
                 </TouchableOpacity>
-              ))}
+                );
+              })}
             </ScrollView>
 
             <TouchableOpacity

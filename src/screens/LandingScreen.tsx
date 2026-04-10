@@ -17,6 +17,7 @@ import {
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/useAuthStore';
+import * as SecureStore from 'expo-secure-store';
 
 const KeyboardDismissView = ({ children }: { children: React.ReactNode }) => {
   if (Platform.OS === 'web') {
@@ -62,6 +63,13 @@ export default function LandingScreen({ onNavigate }: { onNavigate: (screen: str
         if (rpcError || rpcData?.error) {
           throw new Error(rpcData?.error || "Error al verificar repartidor");
         }
+
+        // Guardar sesión en SecureStore para persistir entre reinicios de la app
+        await SecureStore.setItemAsync('repartidor_session', JSON.stringify({
+          userData: rpcData.user,
+          savedRole: 'repartidor',
+          savedPassword: password
+        }));
 
         // Simulación de sesión local
         setUser(rpcData.user, 'repartidor', password);
